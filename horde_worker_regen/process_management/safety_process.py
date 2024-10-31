@@ -217,7 +217,7 @@ class HordeSafetyProcess(HordeProcess):
                 output_path = os.path.join(output_directory, f"{timestamp}.png")
                 
                 # Save the image as a PNG file
-                image_as_pil.save(output_path, "png")
+                image_as_pil.save(output_path, "png", pnginfo=pnginfo_data)
                 
                 logger.success(f"Image saved as {output_path}")
             except Exception as e:
