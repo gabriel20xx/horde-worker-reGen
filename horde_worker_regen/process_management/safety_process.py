@@ -184,13 +184,9 @@ from PIL import Image
 from datetime import datetime
 
 # Set base output directory
-base_output_directory = "/path/to/output/directory"
+base_output_directory = "/output"
 
 for image_base64 in message.images_base64:
-    # Check and remove the 'data:image/png;base64,' prefix if it exists
-    if image_base64.startswith("data:image"):
-        image_base64 = image_base64.split(",")[1]
-
     # Decode the image from base64
     image_bytes = BytesIO(base64.b64decode(image_base64))
     
