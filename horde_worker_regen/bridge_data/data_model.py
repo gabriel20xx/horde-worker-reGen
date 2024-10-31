@@ -58,11 +58,11 @@ class reGenBridgeData(CombinedHordeBridgeData):
     be favored when popping a job.
     """
 
-    high_memory_mode: bool = Field(default=False)
+    high_memory_mode: bool = Field(default=True)
 
     very_high_memory_mode: bool = Field(default=False)
 
-    high_performance_mode: bool = Field(default=False)
+    high_performance_mode: bool = Field(default=True)
     """If you have a 4090 or better, set this to true to enable high performance mode."""
 
     moderate_performance_mode: bool = Field(default=False)
@@ -80,7 +80,7 @@ class reGenBridgeData(CombinedHordeBridgeData):
 
     remove_maintenance_on_init: bool = Field(default=False)
 
-    load_large_models: bool = Field(default=False)
+    load_large_models: bool = Field(default=True)
 
     custom_models: list[dict] = Field(
         default_factory=list,
