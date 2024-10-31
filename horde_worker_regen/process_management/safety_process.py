@@ -193,22 +193,25 @@ class HordeSafetyProcess(HordeProcess):
             try:
                 # Open the image using PIL
                 image_as_pil = Image.open(image_bytes)
-
-                if message.prompt:
-                    prompt = message.prompt,
-                    logger.debug(f"Prompt: {prompt}")
-                if message.horde_model_info:
-                    model_info = message.horde_model_info,
-                    logger.debug(f"Model info: {model_info}")
-                else:
-                    model_info = None
-
-                existing_pnginfo = existing_pnginfo or {}
-                existing_pnginfo[pnginfo_section_name] = model_info
-                pnginfo_data = PngImagePlugin.PngInfo()
-                for k, v in (existing_pnginfo or {}).items():
-                    pnginfo_data.add_text(k, str(v))
                 
+                try:
+                    if message.prompt:
+                        prompt = message.prompt,
+                        logger.debug(f"Prompt: {prompt}")
+                    if message.horde_model_info:
+                        model_info = message.horde_model_info,
+                        logger.debug(f"Model info: {model_info}")
+                    else:
+                        model_info = None
+
+                    existing_pnginfo = existing_pnginfo or {}
+                    existing_pnginfo['parameters'] = model_info
+                    pnginfo_data = PngImagePlugin.PngInfo()
+                    for k, v in (existing_pnginfo or {}).items():
+                        pnginfo_data.add_text(k, str(v))
+                except Exception as e:
+                    logger.error(f"Failed to open image: {type(e).__name__} {e}")
+    
                 # Get the current date and timestamp with milliseconds
                 current_date = datetime.now().strftime("%Y-%m-%d")
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")[:-3]  # Truncate to milliseconds
