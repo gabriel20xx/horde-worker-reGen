@@ -194,10 +194,14 @@ class HordeSafetyProcess(HordeProcess):
                 # Open the image using PIL
                 image_as_pil = Image.open(image_bytes)
 
-                prompt = message.prompt,
-                model_info = message.horde_model_info,
-                logger.debug(f"Prompt: {prompt}")
-                logger.debug(f"Model info: {model_info}")
+                if message.prompt:
+                    prompt = message.prompt,
+                    logger.debug(f"Prompt: {prompt}")
+                if message.horde_model_info:
+                    model_info = message.horde_model_info,
+                    logger.debug(f"Model info: {model_info}")
+                else:
+                    model_info = None
 
                 existing_pnginfo = existing_pnginfo or {}
                 existing_pnginfo[pnginfo_section_name] = model_info
@@ -217,7 +221,10 @@ class HordeSafetyProcess(HordeProcess):
                 output_path = os.path.join(output_directory, f"{timestamp}.png")
                 
                 # Save the image as a PNG file
-                image_as_pil.save(output_path, "png", pnginfo=pnginfo_data)
+                if message.horde_model_info:
+                    image_as_pil.save(output_path, "png", pnginfo=pnginfo_data)
+                else:
+                    image_as_pil.save(output_path, "png")
                 
                 logger.success(f"Image saved as {output_path}")
             except Exception as e:
