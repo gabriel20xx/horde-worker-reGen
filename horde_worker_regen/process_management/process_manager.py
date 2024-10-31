@@ -735,33 +735,7 @@ class HordeJobInfo(BaseModel):  # TODO: Split into a new file
     def images_base64(self) -> list[str]:
         """Return a list containing all base64 images."""
         if self.job_image_results is None:
-            return []
-        else:
-            import base64
-            import os
-            import random
-            import string
-            print(base64)
-
-            images_base64 = self.job_image_results
-            # Assuming `images_base64` is a list of Base64-encoded image strings
-            for base64_image_string in images_base64:
-                # Check and remove the 'data:image/png;base64,' prefix if it exists
-                if base64_image_string.startswith("data:image"):
-                    base64_image_string = base64_image_string.split(",")[1]
-
-                # Decode and save the image as needed
-                image_data = base64.b64decode(base64_image_string)
-                # Continue with saving or processing the decoded imag
-
-                # Generate a random filename
-                random_filename = ''.join(random.choices(string.ascii_letters + string.digits, k=10)) + ".png"
-    
-                # Save the decoded image data as a PNG file
-                with open(os.path.join("/output", random_filename), "wb") as file:
-                    file.write(image_data)
-                
-                
+            return []    
         return [r.image_base64 for r in self.job_image_results]
 
     def fault_job(self) -> None:
