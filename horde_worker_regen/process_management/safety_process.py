@@ -196,7 +196,7 @@ class HordeSafetyProcess(HordeProcess):
                 
                 # Get the current date and timestamp with milliseconds
                 current_date = datetime.now().strftime("%Y-%m-%d")
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")[:-3]  # Truncate to milliseconds
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")[:-3]  # Truncate to milliseconds
                 
                 # Create a folder with the current date
                 output_directory = os.path.join(base_output_directory, current_date)
@@ -206,7 +206,7 @@ class HordeSafetyProcess(HordeProcess):
                 output_path = os.path.join(output_directory, f"{timestamp}.png")
                 
                 # Save the image as a PNG file
-                image_as_pil.save(output_path, "PNG")
+                image_as_pil.save(output_path, "png")
                 
                 print(f"Image saved as {output_path}")
             except Exception as e:
