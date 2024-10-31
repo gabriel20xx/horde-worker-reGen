@@ -180,7 +180,7 @@ class HordeSafetyProcess(HordeProcess):
         import base64
         import os
         from io import BytesIO
-        from PIL import Image
+        from PIL import Image, PngImagePlugin
         from datetime import datetime
         
         # Set base output directory
@@ -193,6 +193,17 @@ class HordeSafetyProcess(HordeProcess):
             try:
                 # Open the image using PIL
                 image_as_pil = Image.open(image_bytes)
+
+                prompt = message.prompt,
+                model_info = message.horde_model_info,
+                logger.debug(f"Prompt: {prompt}")
+                logger.debug(f"Model info: {model_info}")
+
+                existing_pnginfo = existing_pnginfo or {}
+                existing_pnginfo[pnginfo_section_name] = model_info
+                pnginfo_data = PngImagePlugin.PngInfo()
+                for k, v in (existing_pnginfo or {}).items():
+                    pnginfo_data.add_text(k, str(v))
                 
                 # Get the current date and timestamp with milliseconds
                 current_date = datetime.now().strftime("%Y-%m-%d")
@@ -208,7 +219,7 @@ class HordeSafetyProcess(HordeProcess):
                 # Save the image as a PNG file
                 image_as_pil.save(output_path, "png")
                 
-                print(f"Image saved as {output_path}")
+                logger.success(f"Image saved as {output_path}")
             except Exception as e:
                 logger.error(f"Failed to open image: {type(e).__name__} {e}")
                 safety_evaluations.append(
