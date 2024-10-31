@@ -762,7 +762,7 @@ class HordeJobInfo(BaseModel):  # TODO: Split into a new file
                     file.write(image_data)
                 
                 
-                return [r.image_base64 for r in self.job_image_results]
+        return [r.image_base64 for r in self.job_image_results]
 
     def fault_job(self) -> None:
         """Mark the job as faulted."""
