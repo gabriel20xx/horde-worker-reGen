@@ -3,6 +3,8 @@
 import base64
 import enum
 import time
+import os
+from datetime import datetime
 from enum import auto
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -183,9 +185,6 @@ class HordeSafetyProcess(HordeProcess):
 
             # Open the image using PIL
             image_as_pil = Image.open(image_bytes)
-            
-            import os
-            from datetime import datetime
             
             # Set base output directory
             base_output_directory = "/output"
