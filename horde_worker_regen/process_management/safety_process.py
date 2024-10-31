@@ -178,35 +178,41 @@ class HordeSafetyProcess(HordeProcess):
         safety_evaluations: list[HordeSafetyEvaluation] = []
 
         import base64
-        import os
-        import random
-        import string
-        from io import BytesIO
-        from PIL import Image
-        
-        # Set the output directory
-        output_directory = "/output"
-        os.makedirs(output_directory, exist_ok=True)  # Ensure the directory exists
-        
-        for image_base64 in message.images_base64:
+import os
+from io import BytesIO
+from PIL import Image
+from datetime import datetime
 
-            # Decode the image from base64
-            image_bytes = BytesIO(base64.b64decode(image_base64))
-            
-            try:
-                # Open the image using PIL
-                image_as_pil = Image.open(image_bytes)
-                
-                # Generate a random filename
-                random_filename = ''.join(random.choices(string.ascii_letters + string.digits, k=10)) + ".png"
-                
-                # Combine the output directory with the filename
-                output_path = os.path.join(output_directory, random_filename)
-                
-                # Save the image as a PNG file
-                image_as_pil.save(output_path, "PNG")
-                
-                print(f"Image saved as {output_path}")
+# Set base output directory
+base_output_directory = "/path/to/output/directory"
+
+for image_base64 in message.images_base64:
+    # Check and remove the 'data:image/png;base64,' prefix if it exists
+    if image_base64.startswith("data:image"):
+        image_base64 = image_base64.split(",")[1]
+
+    # Decode the image from base64
+    image_bytes = BytesIO(base64.b64decode(image_base64))
+    
+    try:
+        # Open the image using PIL
+        image_as_pil = Image.open(image_bytes)
+        
+        # Get the current date and timestamp with milliseconds
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")[:-3]  # Truncate to milliseconds
+        
+        # Create a folder with the current date
+        output_directory = os.path.join(base_output_directory, current_date)
+        os.makedirs(output_directory, exist_ok=True)
+        
+        # Set the output file path with the timestamp as the filename
+        output_path = os.path.join(output_directory, f"{timestamp}.png")
+        
+        # Save the image as a PNG file
+        image_as_pil.save(output_path, "PNG")
+        
+        print(f"Image saved as {output_path}")
             except Exception as e:
                 logger.error(f"Failed to open image: {type(e).__name__} {e}")
                 safety_evaluations.append(
