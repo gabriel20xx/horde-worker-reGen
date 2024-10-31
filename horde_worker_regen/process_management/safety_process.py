@@ -185,7 +185,7 @@ class HordeSafetyProcess(HordeProcess):
         from PIL import Image
         
         # Set the output directory
-        output_directory = "/path/to/output/directory"
+        output_directory = "/output"
         os.makedirs(output_directory, exist_ok=True)  # Ensure the directory exists
         
         for image_base64 in message.images_base64:
