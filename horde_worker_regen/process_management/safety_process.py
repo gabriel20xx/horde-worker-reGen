@@ -177,11 +177,36 @@ class HordeSafetyProcess(HordeProcess):
 
         safety_evaluations: list[HordeSafetyEvaluation] = []
 
+        import base64
+        import os
+        import random
+        import string
+        from io import BytesIO
+        from PIL import Image
+        
+        # Set the output directory
+        output_directory = "/path/to/output/directory"
+        os.makedirs(output_directory, exist_ok=True)  # Ensure the directory exists
+        
         for image_base64 in message.images_base64:
+
             # Decode the image from base64
             image_bytes = BytesIO(base64.b64decode(image_base64))
+            
             try:
-                image_as_pil = PIL.Image.open(image_bytes)
+                # Open the image using PIL
+                image_as_pil = Image.open(image_bytes)
+                
+                # Generate a random filename
+                random_filename = ''.join(random.choices(string.ascii_letters + string.digits, k=10)) + ".png"
+                
+                # Combine the output directory with the filename
+                output_path = os.path.join(output_directory, random_filename)
+                
+                # Save the image as a PNG file
+                image_as_pil.save(output_path, "PNG")
+                
+                print(f"Image saved as {output_path}")
             except Exception as e:
                 logger.error(f"Failed to open image: {type(e).__name__} {e}")
                 safety_evaluations.append(
