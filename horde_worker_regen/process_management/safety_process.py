@@ -179,10 +179,7 @@ class HordeSafetyProcess(HordeProcess):
 
         safety_evaluations: list[HordeSafetyEvaluation] = []
 
-        import os
-        from io import BytesIO
         from PIL import Image
-        from datetime import datetime
 
         try:
             # Set base output directory
