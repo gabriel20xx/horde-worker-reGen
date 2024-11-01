@@ -179,22 +179,24 @@ class HordeSafetyProcess(HordeProcess):
 
         safety_evaluations: list[HordeSafetyEvaluation] = []
 
-        import base64
         import os
         from io import BytesIO
         from PIL import Image
         from datetime import datetime
 
-        # Set base output directory
-        base_output_directory = "/output"
-
-        # Pre-calculate the date-based output directory
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        output_directory = os.path.join(base_output_directory, current_date)
-
-        # Ensure the directory is created and set full permissions (read, write, execute for all)
-        os.makedirs(output_directory, exist_ok=True)
-        os.chmod(output_directory, 0o777)
+        try:
+            # Set base output directory
+            base_output_directory = "/output"
+    
+            # Pre-calculate the date-based output directory
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            output_directory = os.path.join(base_output_directory, current_date)
+    
+            # Ensure the directory is created and set full permissions (read, write, execute for all)
+            os.makedirs(output_directory, exist_ok=True)
+            os.chmod(output_directory, 0o777)
+        except Exception as e:
+            logger.error(f"Failed to create directories and/or getting the current date")
 
         for image_base64 in message.images_base64:
             # Decode the image from base64
@@ -202,16 +204,22 @@ class HordeSafetyProcess(HordeProcess):
 
             try:
                 # Open the image using PIL
-                image_as_pil = Image.open(image_bytes)
+                image_as_pil_0 = Image.open(image_bytes)
 
                 # Generate a timestamp with milliseconds only once per image
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")[:-3]
                 output_path = os.path.join(output_directory, f"{timestamp}.png")
 
                 # Save the image as a PNG file
-                image_as_pil.save(output_path, "png")
+                image_as_pil_0.save(output_path, "png")
 
                 print(f"Image saved as {output_path}")
+            except Exception as e:
+                logger.error(f"Failed to save picture")
+            
+            try:
+                # Open the image using PIL
+                image_as_pil = Image.open(image_bytes)
             except Exception as e:
                 logger.error(f"Failed to open image: {type(e).__name__} {e}")
                 safety_evaluations.append(
