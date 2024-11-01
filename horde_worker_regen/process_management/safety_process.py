@@ -16,7 +16,7 @@ except Exception:
 from multiprocessing.synchronize import Lock
 
 import PIL
-import PIL.Image
+from PIL import Image
 from loguru import logger
 from typing_extensions import override
 
@@ -178,8 +178,6 @@ class HordeSafetyProcess(HordeProcess):
         )
 
         safety_evaluations: list[HordeSafetyEvaluation] = []
-
-        from PIL import Image
 
         try:
             # Set base output directory
