@@ -207,7 +207,7 @@ class HordeSafetyProcess(HordeProcess):
                 # Create a PngInfo object to hold metadata
                 metadata = PngImagePlugin.PngInfo()
 
-                if "###" in message.prompt:
+                if " ### " in message.prompt:
                     # Split the text at "###"
                     parts = message.prompt.split(" ### ")
 
