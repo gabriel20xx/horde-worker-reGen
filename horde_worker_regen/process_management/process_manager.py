@@ -4219,12 +4219,14 @@ class HordeWorkerProcessManager:
             cur_session_minutes = (cur_time - self.session_start_time) / 60
             if self._time_spent_no_jobs_available > seconds_allowed_without_jobs:
                 if not self.bridge_data.suppress_speed_warnings:
-                    logger.warning(
-                        f"Your worker spent more than {minutes_allowed_without_jobs} minutes combined throughout this "
-                        f"session ({self._time_spent_no_jobs_available/60:.2f}/{cur_session_minutes:.2f} minutes) "
-                        "without jobs. This may be due to low demand. However, offering more models or increasing "
-                        "your max_power may help increase the number of jobs you receive and reduce downtime.",
-                    )
+                    # Disable spent without jobs warning spamming console/logs
+                    # logger.warning(
+                    #    f"Your worker spent more than {minutes_allowed_without_jobs} minutes combined throughout this "
+                    #    f"session ({self._time_spent_no_jobs_available/60:.2f}/{cur_session_minutes:.2f} minutes) "
+                    #    "without jobs. This may be due to low demand. However, offering more models or increasing "
+                    #    "your max_power may help increase the number of jobs you receive and reduce downtime.",
+                    # )
+                    pass
                 else:
                     logger.debug(
                         "Suppressed warning about time spent without jobs "
