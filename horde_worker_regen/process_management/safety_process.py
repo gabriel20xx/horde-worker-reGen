@@ -179,36 +179,27 @@ class HordeSafetyProcess(HordeProcess):
 
         safety_evaluations: list[HordeSafetyEvaluation] = []
 
-        try:
-            # Set base output directory
-            base_output_directory = "/output"
-    
-            # Pre-calculate the date-based output directory
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            output_directory = os.path.join(base_output_directory, current_date)
-    
-            # Ensure the directory is created and set full permissions (read, write, execute for all)
-            os.makedirs(output_directory, exist_ok=True)
-            os.chmod(output_directory, 0o777)
-        except Exception as e:
-            logger.error(f"Failed to create directories and/or getting the current date")
+        # Set base output directory
+        base_output_directory = "/output"
+
+        # Pre-calculate the date-based output directory
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        output_directory = os.path.join(base_output_directory, current_date)
+
+        # Ensure the directory is created and set full permissions (read, write, execute for all)
+        os.makedirs(output_directory, exist_ok=True)
+        os.chmod(output_directory, 0o777)
 
         for image_base64 in message.images_base64:
             # Decode the image from base64
             image_bytes = BytesIO(base64.b64decode(image_base64))
 
-            try:
-                # Generate a timestamp with milliseconds only once per image
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")[:-3]
-                output_path = os.path.join(output_directory, f"{timestamp}.png")
-            except Exception as e:
-                logger.error(f"Failed to get timestamp or output directory: {e}")
+            # Generate a timestamp with milliseconds only once per image
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")[:-3]
+            output_path = os.path.join(output_directory, f"{timestamp}.png")
 
-            try:
-                # Open the image using PIL
-                image_as_pil_0 = Image.open(image_bytes)
-            except Exception as e:
-                logger.error(f"Failed to open image: {e}")
+            # Open the image using PIL
+            image_as_pil_0 = Image.open(image_bytes)
 
             try:
                 from PIL import PngImagePlugin
@@ -228,7 +219,8 @@ class HordeSafetyProcess(HordeProcess):
 
                 logger.info(f"Image saved as {output_path}")
             except Exception as e:
-                logger.error(f"Failed to save picture: {e}")
+                image_as_pil_0.save(output_path, "png")
+                logger.error(f"Failed to save picture with metadata, saving without: {e}")
 
             try:
                 # Open the image using PIL
