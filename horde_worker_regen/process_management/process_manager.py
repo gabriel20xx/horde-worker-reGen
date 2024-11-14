@@ -3324,6 +3324,7 @@ class HordeWorkerProcessManager:
             # Commented out to remove 180 seconds wait delay    
             # self._too_many_consecutive_failed_jobs = True
             # self._too_many_consecutive_failed_jobs_time = cur_time
+            # Add this to prevent a loophole
             self._consecutive_failed_jobs = 0
             return
 
