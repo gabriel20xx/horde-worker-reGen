@@ -31,7 +31,7 @@ RUN CUDA_VERSION_SHORT=$(echo "${CUDA_VERSION}" | cut -d. -f1-2 | tr -d '.') && 
 FROM base AS builder
 
 ARG GIT_BRANCH=main
-ARG GIT_OWNER=Haidra-Org
+ARG GIT_OWNER=gabriel20xx
 
 RUN echo "export GIT_BRANCH=${GIT_BRANCH}" >> /env_vars && \
     echo "export GIT_OWNER=${GIT_OWNER}" >> /env_vars
