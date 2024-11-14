@@ -3310,7 +3310,7 @@ class HordeWorkerProcessManager:
                 logger.debug("Resuming job pops after too many consecutive failed jobs")
             return
 
-        if self._consecutive_failed_jobs >= 3:
+        if self._consecutive_failed_jobs < -1:
             logger.error(
                 "Too many consecutive failed jobs, pausing job pops. "
                 "Please look into what happened and let the devs know. ",
