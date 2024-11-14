@@ -3531,7 +3531,8 @@ class HordeWorkerProcessManager:
 
         if job_pop_response.id_ is None:
             self._last_pop_no_jobs_available = True
-            logger.info(info_string)
+            # Removed no job available spamming log/console
+            # logger.info(info_string)
             if len(self.job_deque) == 0:
                 if self._last_pop_no_jobs_available_time == 0.0:
                     self._last_pop_no_jobs_available_time = cur_time
