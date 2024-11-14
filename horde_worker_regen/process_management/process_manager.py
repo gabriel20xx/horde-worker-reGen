@@ -238,8 +238,9 @@ class HordeProcessInfo:
         try:
             self.pipe_connection.send(message)
             return True
-        except Exception as e:
-            logger.error(f"Failed to send message to process {self.process_id}: {e}")
+        except Exception:
+            # Prevent the log/console to get spammed
+            # logger.error(f"Failed to send message to process {self.process_id}: {e}")
             return False
 
     def __repr__(self) -> str:
