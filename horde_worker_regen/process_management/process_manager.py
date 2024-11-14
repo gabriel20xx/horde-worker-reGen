@@ -3312,11 +3312,12 @@ class HordeWorkerProcessManager:
             return
 
         if self._consecutive_failed_jobs >= 3:
-            logger.error(
-                "Too many consecutive failed jobs, pausing job pops. "
-                "Please look into what happened and let the devs know. ",
-                f"Waiting {self._too_many_consecutive_failed_jobs_wait_time} seconds...",
-            )
+            # Disable console/log spamming
+            # logger.error(
+            #     "Too many consecutive failed jobs, pausing job pops. "
+            #     "Please look into what happened and let the devs know. ",
+            #     f"Waiting {self._too_many_consecutive_failed_jobs_wait_time} seconds...",
+            # )
             if self.bridge_data.exit_on_unhandled_faults:
                 logger.error("Exiting due to exit_on_unhandled_faults being enabled")
                 self._abort()
