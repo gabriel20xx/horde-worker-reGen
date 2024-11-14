@@ -216,11 +216,11 @@ class HordeSafetyProcess(HordeProcess):
                     negative_prompt = parts[1]
                 else:
                     positive_prompt = message.prompt
+                    negative_prompt = ""
 
                 # Add custom metadata
                 metadata.add_text("Positive prompt", positive_prompt)
-                if negative_prompt:
-                    metadata.add_text("Negative prompt", negative_prompt)
+                metadata.add_text("Negative prompt", negative_prompt)
                 metadata.add_text("Model info", message.horde_model_info)
             except Exception as e:
                 logger.error(f"Failed to add metadata: {e}")
