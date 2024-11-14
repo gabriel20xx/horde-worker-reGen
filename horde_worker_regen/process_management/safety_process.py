@@ -207,8 +207,20 @@ class HordeSafetyProcess(HordeProcess):
                 # Create a PngInfo object to hold metadata
                 metadata = PngImagePlugin.PngInfo()
 
+                if "###" in message.prompt:
+                    # Split the text at "###"
+                    parts = message.prompt.split(" ### ")
+
+                    # Get the string before and after "###"
+                    positive_prompt = parts[0]
+                    negative_prompt = parts[1]
+                else:
+                    positive_prompt = message.prompt
+
                 # Add custom metadata
-                metadata.add_text("Prompt", message.prompt)
+                metadata.add_text("Positive prompt", positive_prompt)
+                if negative_prompt:
+                    metadata.add_text("Negative prompt", negative_prompt)
                 metadata.add_text("Model info", message.horde_model_info)
             except Exception as e:
                 logger.error(f"Failed to add metadata: {e}")
