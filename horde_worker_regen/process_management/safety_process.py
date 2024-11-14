@@ -198,20 +198,38 @@ class HordeSafetyProcess(HordeProcess):
             image_bytes = BytesIO(base64.b64decode(image_base64))
 
             try:
-                # Open the image using PIL
-                image_as_pil_0 = Image.open(image_bytes)
-
                 # Generate a timestamp with milliseconds only once per image
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")[:-3]
                 output_path = os.path.join(output_directory, f"{timestamp}.png")
+            except Exception as e:
+                logger.error(f"Failed to get timestamp or output directory: {e}")
 
+            try:
+                # Open the image using PIL
+                image_as_pil_0 = Image.open(image_bytes)
+            except Exception as e:
+                logger.error(f"Failed to open image: {e}")
+
+            try:
+                from PIL import PngImagePlugin
+
+                # Create a PngInfo object to hold metadata
+                metadata = PngImagePlugin.PngInfo()
+
+                # Add custom metadata
+                metadata.add_text("Prompt", message.prompt)
+                metadata.add_text("Model info", message.horde_model_info)
+            except Exception as e:
+                logger.error(f"Failed to add metadata: {e}")
+
+            try:
                 # Save the image as a PNG file
-                image_as_pil_0.save(output_path, "png")
+                image_as_pil_0.save(output_path, "png", pnginfo=metadata)
 
                 logger.info(f"Image saved as {output_path}")
             except Exception as e:
-                logger.error(f"Failed to save picture")
-            
+                logger.error(f"Failed to save picture: {e}")
+
             try:
                 # Open the image using PIL
                 image_as_pil = Image.open(image_bytes)
