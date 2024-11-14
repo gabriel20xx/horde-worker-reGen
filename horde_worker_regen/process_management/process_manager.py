@@ -3316,7 +3316,7 @@ class HordeWorkerProcessManager:
             # logger.error(
             #     "Too many consecutive failed jobs, pausing job pops. "
             #     "Please look into what happened and let the devs know. ",
-            #     f"Waiting {self._too_many_consecutive_failed_jobs_wait_time} seconds...",
+            #     f"Waiting {self._too_many_consecutive_failed_jobs_wait_time} seconds...",F
             # )
             if self.bridge_data.exit_on_unhandled_faults:
                 logger.error("Exiting due to exit_on_unhandled_faults being enabled")
@@ -3324,6 +3324,7 @@ class HordeWorkerProcessManager:
             # Commented out to remove 180 seconds wait delay    
             # self._too_many_consecutive_failed_jobs = True
             # self._too_many_consecutive_failed_jobs_time = cur_time
+            self._consecutive_failed_jobs = 0
             return
 
         max_jobs_in_queue = self.bridge_data.queue_size + 1
