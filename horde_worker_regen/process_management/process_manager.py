@@ -2881,10 +2881,11 @@ class HordeWorkerProcessManager:
 
                     # If the current file is greater than 2mb, we will create a new file with a sequential number
 
-                    file_name_to_use = self.bridge_data.kudos_training_data_file
+                    file_name_to_use = f"kudos_model_training/{self.bridge_data.kudos_training_data_file}"
+                    os.makedirs("kudos_model_training", exist_ok=True)
                     if os.path.exists(file_name_to_use) and os.path.getsize(file_name_to_use) > 2 * 1024 * 1024:
-                        for i in range(1, 100):
-                            new_file_name = f"{self.bridge_data.kudos_training_data_file}.{i}"
+                        for i in range(1, 10000):
+                            new_file_name = f"kudos_model_training/{self.bridge_data.kudos_training_data_file}.{i}"
                             if os.path.exists(new_file_name) and os.path.getsize(new_file_name) > 2 * 1024 * 1024:
                                 continue
 
@@ -2947,10 +2948,14 @@ class HordeWorkerProcessManager:
                                         esi_combined_size += len(esi.image)
                                 model_dump["sdk_api_job_info"]["extra_source_images_combined_size"] = esi_combined_size
                                 model_dump["sdk_api_job_info"]["source_image_size"] = (
-                                    len(hji.sdk_api_job_info.source_image) if hji.sdk_api_job_info.source_image else 0
+                                    len(hji.sdk_api_job_info._downloaded_source_image)
+                                    if hji.sdk_api_job_info._downloaded_source_image
+                                    else 0
                                 )
                                 model_dump["sdk_api_job_info"]["source_mask_size"] = (
-                                    len(hji.sdk_api_job_info.source_mask) if hji.sdk_api_job_info.source_mask else 0
+                                    len(hji.sdk_api_job_info._downloaded_source_mask)
+                                    if hji.sdk_api_job_info._downloaded_source_mask
+                                    else 0
                                 )
                                 if not os.path.exists(file_name_to_use):
                                     with open(file_name_to_use, "w") as f:
@@ -3530,7 +3535,15 @@ class HordeWorkerProcessManager:
         if len(self.job_deque) > 0:
             info_string += f"Current number of popped jobs: {len(self.job_deque)}. "
 
-        info_string += f"(Skipped reasons: {job_pop_response.skipped.model_dump(exclude_defaults=True)})"
+        skipped_reasons = job_pop_response.skipped.model_dump(exclude_defaults=True)
+        # Include the extra fields as well
+        if job_pop_response.skipped.model_extra is not None:
+            skipped_reasons.update(job_pop_response.skipped.model_extra)
+
+        # Remove any '0' values
+        skipped_reasons = {k: v for k, v in skipped_reasons.items() if v != 0}
+
+        info_string += f"(Skipped reasons: {skipped_reasons})"
 
         if job_pop_response.id_ is None:
             self._last_pop_no_jobs_available = True
