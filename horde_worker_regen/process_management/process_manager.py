@@ -3503,7 +3503,7 @@ class HordeWorkerProcessManager:
                     logger.warning(f"Failed to pop job (Maintenance Mode): {job_pop_response}")
                     try:
                         self.remove_maintenance()
-                        logger.info(f"Maintenance mode automatically deactivated")
+                        logger.success(f"Maintenance mode automatically deactivated")
                     except Exception as e:
                         logger.error(f"Maintenance mode couldn't been deactivated automatically")
                 elif "we cannot accept workers serving" in job_pop_response.message.lower():
