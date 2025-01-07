@@ -29,26 +29,38 @@ class reGenBridgeData(CombinedHordeBridgeData):
     safety_on_gpu: bool = Field(
         default=False,
     )
+    """If true, the safety model will be run on the GPU."""
 
     _yaml_loader: YAML | None = None
 
     cycle_process_on_model_change: bool = Field(
         default=False,
     )
+    """If true, the process will stop and restart when the model loaded changes.
+
+    Warning: This can cause substantial delays in processing.
+    """
 
     CIVIT_API_TOKEN: str | None = Field(
         default=None,
         alias="civitai_api_token",
     )
-    unload_models_from_vram_often: bool = Field(default=True)
+    """The API token for CivitAI, used for downloading LoRas and login-required models."""
 
-    process_timeout: int = Field(default=900)
+    unload_models_from_vram_often: bool = Field(default=True)
+    """If true, models will be unloaded from VRAM more often."""
+
+    process_timeout: int = Field(default=300)
     """The maximum amount of time to allow a job to run before it is killed"""
 
     post_process_timeout: int = Field(default=60, ge=15)
 
     download_timeout: int = Field(default=TOTAL_LORA_DOWNLOAD_TIMEOUT + 1)
-    preload_timeout: int = Field(default=60, ge=15)
+    """The maximum amount of time to allow an aux model to download before it is killed"""
+    preload_timeout: int = Field(default=80, ge=15)
+    """The maximum amount of time to allow a model to load before it is killed"""
+    inference_step_timeout: int = Field(default=15, ge=15, le=30)
+    """The maximum amount of time to allow a single inference step to run before the process is killed"""
 
     minutes_allowed_without_jobs: int = Field(default=30, ge=0, lt=60 * 60)
 
@@ -59,8 +71,13 @@ class reGenBridgeData(CombinedHordeBridgeData):
     """
 
     high_memory_mode: bool = Field(default=True)
+    """Indicates that the worker should consume more memory to improve performance."""
 
     very_high_memory_mode: bool = Field(default=False)
+    """Indicates that the worker should consume even more memory to improve performance.
+
+    This has data-center grade cards in mind, and is not recommended for consumer grade cards.
+    """
 
     high_performance_mode: bool = Field(default=True)
     """If you have a 4090 or better, set this to true to enable high performance mode."""
@@ -75,9 +92,11 @@ class reGenBridgeData(CombinedHordeBridgeData):
     """High and moderate performance modes will skip post processing if this is set to true."""
 
     capture_kudos_training_data: bool = Field(default=False)
+
     kudos_training_data_file: str | None = Field(default=None)
 
     exit_on_unhandled_faults: bool = Field(default=False)
+    """If true, the worker will exit if an unhandled fault occurs instead of attempting to recover."""
 
     purge_loras_on_download: bool = Field(default=False)
 
@@ -89,6 +108,12 @@ class reGenBridgeData(CombinedHordeBridgeData):
         default_factory=list,
     )
 
+    limited_console_messages: bool = Field(default=False)
+    """If true, the worker will only log for submit and the status message.
+
+    Set stats_output_frequency (in seconds) for control over the status message.
+    """
+
     @model_validator(mode="after")
     def validate_performance_modes(self) -> reGenBridgeData:
         """Validate the performance modes and set the appropriate values.
@@ -96,17 +121,38 @@ class reGenBridgeData(CombinedHordeBridgeData):
         Returns:
             reGenBridgeData: The config model with the performance modes set appropriately.
         """
-        if self.max_threads == 2 and self.queue_size > 3:
+        if self.max_threads >= 2 and self.queue_size > 3:
             self.queue_size = 3
             logger.warning(
                 "The queue_size value has been set to 3 because the max_threads value is 2.",
             )
 
-        if self.max_threads > 2 and self.queue_size > 2:
-            self.queue_size = 2
-            logger.warning(
-                "The queue_size value has been set to 2 because the max_threads value is greater than 2.",
+        if self.high_performance_mode:
+            process_timeout_changed_message = (
+                "High performance mode is enabled, so the process_timeout value has "
+                f"been set to 1/3 of the default value. The new value is {self.process_timeout}."
             )
+            default_process_timeout = self.model_fields["process_timeout"].default
+
+            if self.process_timeout == default_process_timeout:
+                logger.debug(process_timeout_changed_message)
+            else:
+                logger.warning(process_timeout_changed_message)
+
+            self.process_timeout = default_process_timeout // 3
+        elif self.moderate_performance_mode:
+            process_timeout_changed_message = (
+                "Moderate performance mode is enabled, so the process_timeout value has "
+                f"been set to 1/2 of the default value. The new value is {self.process_timeout}."
+            )
+            default_process_timeout = self.model_fields["process_timeout"].default
+
+            if self.process_timeout == default_process_timeout:
+                logger.debug(process_timeout_changed_message)
+            else:
+                logger.warning(process_timeout_changed_message)
+
+            self.process_timeout = default_process_timeout // 2
 
         if self.extra_slow_worker:
             if self.high_performance_mode:
@@ -147,29 +193,29 @@ class reGenBridgeData(CombinedHordeBridgeData):
                     "Extra slow worker is enabled, so the preload_timeout value has been set to 120. "
                     "This behavior may change in the future.",
                 )
-            if not self.post_process_job_overlap:
-                self.post_process_job_overlap = True
-                logger.warning(
-                    "Extra slow worker is enabled, so the post_process_job_overlap value has been set to True. "
-                    "This behavior may change in the future.",
-                )
 
         if self.very_high_memory_mode and not self.high_memory_mode:
             self.high_memory_mode = True
-            logger.warning(
+            logger.debug(
                 "Very high memory mode is enabled, so the high_memory_mode value has been set to True.",
             )
 
-        if self.high_memory_mode and not self.very_high_memory_mode:
-            if self.max_threads != 1:
+        if self.high_memory_mode:
+            if self.max_threads == 1:
                 logger.warning(
-                    "High memory mode is enabled. You may experience performance issues with more than one thread.",
+                    "High memory mode is enabled, you should consider setting max_threads to 2.",
+                )
+
+            if self.queue_size == 0:
+                logger.warning(
+                    "High memory mode is enabled, you should consider setting queue_size to 1 or higher. "
+                    "Increasing this value increases system memory usage. See the bridgeData_template.yaml for more "
+                    "information.",
                 )
 
             if self.unload_models_from_vram_often:
                 logger.warning(
-                    "Please let us know if `unload_models_from_vram_often` improves or degrades performance with"
-                    " `high_memory_mode` enabled.",
+                    "High memory mode is enabled, you should consider setting unload_models_from_vram_often to False.",
                 )
 
             if self.cycle_process_on_model_change:
@@ -228,7 +274,8 @@ class reGenBridgeData(CombinedHordeBridgeData):
                 os.remove(f"{cwd}/custom_models.json")
         os.environ["HORDELIB_CUSTOM_MODELS"] = f"{cwd}/custom_models.json"
 
-    def load_custom_models(self) -> None:
+    @staticmethod
+    def load_custom_models() -> None:
         """Load the custom models from the `custom_models.json` file."""
         cwd = os.getcwd()
         if not os.getenv("HORDELIB_CUSTOM_MODELS") and os.path.exists(f"{cwd}/custom_models.json"):
