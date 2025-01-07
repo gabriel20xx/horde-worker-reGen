@@ -15,10 +15,17 @@ import os
 import time
 from multiprocessing.context import BaseContext
 
+import regex as re
 from loguru import logger
 
 
-def main(ctx: BaseContext, load_from_env_vars: bool = False, *, amd_gpu: bool = False) -> None:
+def main(
+    ctx: BaseContext,
+    load_from_env_vars: bool = False,
+    *,
+    amd_gpu: bool = False,
+    directml: int | None = None,
+) -> None:
     """Check for a valid config and start the driver ('main') process for the reGen worker."""
     from horde_model_reference.model_reference_manager import ModelReferenceManager
     from pydantic import ValidationError
@@ -67,7 +74,6 @@ def main(ctx: BaseContext, load_from_env_vars: bool = False, *, amd_gpu: bool = 
                 file_path=BRIDGE_CONFIG_FILENAME,
                 horde_model_reference_manager=horde_model_reference_manager,
             )
-            bridge_data.load_custom_models()
     except ConnectionRefusedError:
         logger.error("Could not connect to the the horde. Is it down?")
         input("Press any key to exit...")
@@ -98,34 +104,61 @@ def main(ctx: BaseContext, load_from_env_vars: bool = False, *, amd_gpu: bool = 
         bridge_data=bridge_data,
         horde_model_reference_manager=horde_model_reference_manager,
         amd_gpu=amd_gpu,
+        directml=directml,
     )
+
+    logger.info("Worker has finished working.")
+    logger.info("Exiting...")
 
 
 class LogConsoleRewriter(io.StringIO):
     """Makes the console output more readable by shortening certain strings."""
 
-    def __init__(self, original_stdout: io.TextIOBase) -> None:
+    def __init__(self, original_iostream: io.TextIOBase) -> None:
         """Initialise the rewriter."""
-        self.original_stdout = original_stdout
+        self.original_iostream = original_iostream
+
+        pattern = r"\[36m(\d+)"
+
+        self.line_number_pattern = re.compile(pattern)
 
     def write(self, message: str) -> int:
         """Rewrite the message to make it more readable where possible."""
         replacements = [
-            ("horde_worker_regen.process_management.process_manager", "[HWRPM]"),
+            ("horde_worker_regen.process_management.process_manager", "*"),
             ("horde_worker_regen.", "[HWR]"),
+            ("print_status_method", ""),
+            ("receive_and_handle_process_messages", "[ % ]"),
+            ("print_status_method", "[ i ]"),
+            ("start_inference_processes", "[SIP]"),
+            ("_start_inference_process", "[SIP]"),
+            ("start_inference_process", "[SIP]"),
+            ("start_safety_process", "[SSP]"),
+            ("start_inference", "[ % ]"),
+            ("log_kudos_info", "[ i ]"),
+            ("submit_single_generation", "[ - ]"),
+            ("preload_models", "[ % ]"),
+            ("api_job_pop", "[ + ]"),
+            ("_process_control_loop", "[ # ]"),
+            ("_bridge_data_loop", "[ C ]"),
+            ("enable_performance_mode", "[ C ]"),
         ]
 
         for old, new in replacements:
             message = message.replace(old, new)
 
-        if sys.__stdout__ is None:
-            raise ValueError("sys.__stdout__ is None!")
+        replacement = ""
 
-        return sys.__stdout__.write(message)
+        message = self.line_number_pattern.sub(replacement, message)
+
+        if self.original_iostream is None:
+            raise ValueError("self.original_iostream. is None!")
+
+        return self.original_iostream.write(message)
 
     def flush(self) -> None:
         """Flush the buffer to the original stdout."""
-        self.original_stdout.flush()
+        self.original_iostream.flush()
 
 
 def init() -> None:
@@ -165,6 +198,12 @@ def init() -> None:
         default=None,
         help="Override the worker name from the config file, for running multiple workers on one machine",
     )
+    parser.add_argument(
+        "--directml",
+        type=int,
+        default=None,
+        help="Enable directml and specify device to use.",
+    )
 
     args = parser.parse_args()
 
@@ -184,15 +223,28 @@ def init() -> None:
 
     do_version_check()
 
-    rewriter = LogConsoleRewriter(sys.stdout)  # type: ignore
-    sys.stdout = rewriter
+    rewriter_stdout = LogConsoleRewriter(sys.stdout)  # type: ignore
+    sys.stdout = rewriter_stdout
+
+    rewriter_stderr = LogConsoleRewriter(sys.stderr)  # type: ignore
+    sys.stderr = rewriter_stderr
+
+    AIWORKER_LIMITED_CONSOLE_MESSAGES = os.getenv("AIWORKER_LIMITED_CONSOLE_MESSAGES")
 
     logger.remove()
     from hordelib.utils.logger import HordeLog
 
     target_verbosity = args.v
 
-    if args.no_logging:
+    if AIWORKER_LIMITED_CONSOLE_MESSAGES:
+        if target_verbosity > 2:
+            print(
+                "Warning: AIWORKER_LIMITED_CONSOLE_MESSAGES is set"
+                " but verbosity is set to 3 or higher. Setting verbosity to 2.",
+            )
+
+        target_verbosity = 2
+    elif args.no_logging:
         target_verbosity = 0  # Disable logging to the console
     elif args.v == 0:
         target_verbosity = 3  # Default to INFO or higher (Warning, Error, Critical)
@@ -206,7 +258,12 @@ def init() -> None:
 
     # We only need to download the legacy DBs once, so we do it here instead of in the worker processes
 
-    main(multiprocessing.get_context("spawn"), args.load_config_from_env_vars, amd_gpu=args.amd)
+    main(
+        multiprocessing.get_context("spawn"),
+        args.load_config_from_env_vars,
+        amd_gpu=args.amd,
+        directml=args.directml,
+    )
 
 
 if __name__ == "__main__":

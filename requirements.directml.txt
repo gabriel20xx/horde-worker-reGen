@@ -1,4 +1,4 @@
-torch==2.5.0
+torch-directml==0.2.5.dev240914
 qrcode==7.4.2 # >8 breaks horde-engine 2.20.12 via the qr code generation nodes
 
 certifi # Required for SSL cert resolution

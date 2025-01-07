@@ -61,6 +61,9 @@ class HordeProcess(abc.ABC):
     disk_lock: Lock
     """A lock used to prevent multiple processes from accessing disk at the same time."""
 
+    process_launch_identifier: int
+    """The unique identifier for this launch."""
+
     _loop_interval: float = 0.02
     """The time to sleep between each loop iteration."""
 
@@ -94,6 +97,7 @@ class HordeProcess(abc.ABC):
         process_message_queue: ProcessQueue,
         pipe_connection: Connection,
         disk_lock: Lock,
+        process_launch_identifier: int,
     ) -> None:
         """Initialise the process.
 
@@ -103,11 +107,13 @@ class HordeProcess(abc.ABC):
                 processes.
             pipe_connection (Connection): Receives `HordeControlMessage`s from the main process.
             disk_lock (Lock): A lock used to prevent multiple processes from accessing disk at the same time.
+            process_launch_identifier (int): The unique identifier for this launch.
         """
         self.process_id = process_id
         self.process_message_queue = process_message_queue
         self.pipe_connection = pipe_connection
         self.disk_lock = disk_lock
+        self.process_launch_identifier = process_launch_identifier
 
         self.send_process_state_change_message(
             process_state=HordeProcessState.PROCESS_STARTING,
@@ -132,6 +138,7 @@ class HordeProcess(abc.ABC):
         message = HordeProcessStateChangeMessage(
             process_state=process_state,
             process_id=self.process_id,
+            process_launch_identifier=self.process_launch_identifier,
             info=info,
             time_elapsed=time_elapsed,
         )
@@ -142,7 +149,13 @@ class HordeProcess(abc.ABC):
     _last_heartbeat_time: float = 0.0
     _last_heartbeat_type: HordeHeartbeatType = HordeHeartbeatType.OTHER
 
-    def send_heartbeat_message(self, heartbeat_type: HordeHeartbeatType) -> None:
+    def send_heartbeat_message(
+        self,
+        heartbeat_type: HordeHeartbeatType,
+        *,
+        process_warning: str | None = None,
+        percent_complete: int | None = None,
+    ) -> None:
         """Send a heartbeat message to the main process, indicating that the process is still alive.
 
         Note that this will only send a heartbeat message if the last heartbeat was sent more than
@@ -155,9 +168,12 @@ class HordeProcess(abc.ABC):
 
         message = HordeProcessHeartbeatMessage(
             process_id=self.process_id,
+            process_launch_identifier=self.process_launch_identifier,
             info="Heartbeat",
             time_elapsed=None,
             heartbeat_type=heartbeat_type,
+            process_warning=process_warning,
+            percent_complete=percent_complete,
         )
         self.process_message_queue.put(message)
 
@@ -179,6 +195,7 @@ class HordeProcess(abc.ABC):
         """
         message = HordeProcessMemoryMessage(
             process_id=self.process_id,
+            process_launch_identifier=self.process_launch_identifier,
             info="Memory report",
             time_elapsed=None,
             ram_usage_bytes=psutil.Process().memory_info().rss,
@@ -217,7 +234,12 @@ class HordeProcess(abc.ABC):
                 logger.info("Received end process message")
                 return
 
-            self._receive_and_handle_control_message(message)
+            try:
+                self._receive_and_handle_control_message(message)
+            except Exception as e:
+                logger.error(f"Failed to handle control message: {type(e).__name__} {e}")
+                # This is a terminal error, so we should exit
+                self._end_process = True
 
     def worker_cycle(self) -> None:
         """Do any process specific handling after messages have been received and handled.
@@ -250,7 +272,7 @@ class HordeProcess(abc.ABC):
         )
 
         # We are exiting, so send a final memory report
-        self.send_memory_report_message(include_vram=True)
+        self.send_memory_report_message(include_vram=False)
 
         # Exit the process (we expect to be a child process)
         sys.exit(0)

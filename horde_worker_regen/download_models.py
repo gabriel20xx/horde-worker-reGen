@@ -5,6 +5,7 @@ def download_all_models(
     *,
     load_config_from_env_vars: bool = False,
     purge_unused_loras: bool = False,
+    directml: int | None = None,
 ) -> None:
     """Download all models specified in the config file."""
     from horde_worker_regen.load_env_vars import load_env_vars_from_config
@@ -55,18 +56,14 @@ def download_all_models(
     _ = get_interrogator_no_blip()
     del _
 
-    hordelib.initialise()
+    extra_comfyui_args = []
+    if directml is not None:
+        extra_comfyui_args.append(f"--directml={directml}")
+
+    hordelib.initialise(extra_comfyui_args=extra_comfyui_args)
     from hordelib.shared_model_manager import SharedModelManager
 
     SharedModelManager.load_model_managers()
-
-    if purge_unused_loras or bridge_data.purge_loras_on_download:
-        logger.info("Purging unused LORAs...")
-        if SharedModelManager.manager.lora is None:
-            logger.error("Failed to load LORA model manager")
-            exit(1)
-        deleted_loras = SharedModelManager.manager.lora.delete_unused_loras(30)
-        logger.success(f"Purged {len(deleted_loras)} unused LORAs.")
 
     if bridge_data.allow_lora:
         if SharedModelManager.manager.lora is None:
@@ -75,7 +72,15 @@ def download_all_models(
         SharedModelManager.manager.lora.reset_adhoc_loras()
         SharedModelManager.manager.lora.download_default_loras(bridge_data.nsfw)
         SharedModelManager.manager.lora.wait_for_downloads(600)
-        SharedModelManager.manager.lora.wait_for_adhoc_reset(15)
+        SharedModelManager.manager.lora.wait_for_adhoc_reset(120)
+
+    if purge_unused_loras or bridge_data.purge_loras_on_download:
+        logger.info("Purging unused LORAs...")
+        if SharedModelManager.manager.lora is None:
+            logger.error("Failed to load LORA model manager")
+            exit(1)
+        deleted_loras = SharedModelManager.manager.lora.delete_unused_loras(30)
+        logger.success(f"Purged {len(deleted_loras)} unused LORAs.")
 
     if bridge_data.allow_controlnet:
         if SharedModelManager.manager.controlnet is None:

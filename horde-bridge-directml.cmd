@@ -19,10 +19,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 :DOWNLOAD
-call python -s download_models.py
+call python -s download_models.py --directml=0
 if %ERRORLEVEL% NEQ 0 GOTO ABORT
 echo "Model Download OK. Starting worker..."
-call python -s run_worker.py %*
+call python -s run_worker.py --directml=0 %*
 
 GOTO END
 
@@ -30,6 +30,6 @@ GOTO END
 echo "download_models.py exited with error code. Aborting"
 
 :END
-call "%MAMBA_ROOT_PREFIX%\condabin\micromamba.bat" deactivate >nul
+call micromamba deactivate >nul
 call deactivate >nul
 pause

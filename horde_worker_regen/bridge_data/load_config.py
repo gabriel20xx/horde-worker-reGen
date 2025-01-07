@@ -172,6 +172,8 @@ class BridgeDataLoader:
             horde_model_reference_manager,
         )
 
+        reGenBridgeData.load_custom_models()
+
         return bridge_data
 
     @staticmethod
@@ -288,6 +290,21 @@ class BridgeDataLoader:
         if bridge_data.image_models_to_skip is not None and len(bridge_data.image_models_to_skip) > 0:
             bridge_data.image_models_to_load = list(
                 set(bridge_data.image_models_to_load) - set(bridge_data.image_models_to_skip),
+            )
+
+        # Remove models not in the model reference manager
+        known_models = load_resolver.resolve_all_model_names()
+
+        total_resolved_models = len(bridge_data.image_models_to_load)
+
+        bridge_data.image_models_to_load = list(set(bridge_data.image_models_to_load) & known_models)
+
+        used_models = len(bridge_data.image_models_to_load)
+
+        if total_resolved_models != used_models:
+            logger.debug(
+                f"Resolved {total_resolved_models} models, but only {used_models} "
+                "are available in the model reference manager.",
             )
 
         return bridge_data.image_models_to_load

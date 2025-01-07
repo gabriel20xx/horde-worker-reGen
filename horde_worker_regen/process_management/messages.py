@@ -124,6 +124,8 @@ class HordeProcessMessage(BaseModel):
 
     process_id: int
     """The ID of the process that sent the message."""
+    process_launch_identifier: int
+    """The identifier of the process launch."""
     info: str
     """Information about this operation sent the process."""
     time_elapsed: float | None = None
@@ -135,7 +137,6 @@ class HordeProcessMemoryMessage(HordeProcessMessage):
 
     ram_usage_bytes: int
     """The number of bytes of RAM used by the process."""
-
     vram_usage_bytes: int | None = None
     """The number of bytes of VRAM used by the GPU."""
     vram_total_bytes: int | None = None
@@ -155,6 +156,11 @@ class HordeProcessHeartbeatMessage(HordeProcessMessage):
 
     heartbeat_type: HordeHeartbeatType
     """The type of the heartbeat."""
+    process_warning: str | None = None
+    """A warning message from the process."""
+
+    percent_complete: int | None = None
+    """The percentage (int) of the current operation that is complete, if applicable."""
 
 
 class HordeProcessStateChangeMessage(HordeProcessMessage):

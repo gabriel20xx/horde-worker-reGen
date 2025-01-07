@@ -4,7 +4,7 @@ cd /d "%~dp0"
 SET MAMBA_ROOT_PREFIX=%~dp0conda
 echo %MAMBA_ROOT_PREFIX%
 
-if exist "%MAMBA_ROOT_PREFIX%\condabin\mamba.bat" (
+if exist "%MAMBA_ROOT_PREFIX%\condabin\micromamba.bat" (
     echo Deleting micromamba.exe as its out of date
     del micromamba.exe
     if errorlevel 1 (
@@ -51,7 +51,7 @@ if defined scribe (
   SET CONDA_ENVIRONMENT_FILE=environment_scribe.yaml
 
 ) else (
-  SET CONDA_ENVIRONMENT_FILE=environment.yaml
+  SET CONDA_ENVIRONMENT_FILE=environment.rocm.yaml
 )
 
 Reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v "LongPathsEnabled" /t REG_DWORD /d "1" /f 2>nul
@@ -65,21 +65,21 @@ REM Check if hordelib argument is defined
 
 micromamba.exe shell hook -s cmd.exe %MAMBA_ROOT_PREFIX% -v
 call "%MAMBA_ROOT_PREFIX%\condabin\mamba_hook.bat"
-call "%MAMBA_ROOT_PREFIX%\condabin\micromamba.bat" activate windows
+call "%MAMBA_ROOT_PREFIX%\condabin\mamba.bat" activate windows
 
-python -s -m pip install torch==2.5.0 --index-url https://download.pytorch.org/whl/cu124 -U
+python -s -m pip install torch-directml torchvision==0.19.1
 
 if defined hordelib (
   python -s -m pip uninstall -y hordelib horde_engine horde_model_reference
-  python -s -m pip install horde_engine horde_model_reference --extra-index-url https://download.pytorch.org/whl/cu124
+  python -s -m pip install horde_engine horde_model_reference
 ) else (
   if defined scribe (
     python -s -m pip install -r requirements-scribe.txt
   ) else (
-    python -s -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124 -U
+    python -s -m pip install -r requirements.directml.txt
   )
 )
-call "%MAMBA_ROOT_PREFIX%\condabin\micromamba.bat" deactivate
+call deactivate
 
 echo If there are no errors above everything should be correctly installed (If not, try deleting the folder /conda/envs/ and try again).
 
