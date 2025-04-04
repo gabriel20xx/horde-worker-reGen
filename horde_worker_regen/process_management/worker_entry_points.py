@@ -27,6 +27,7 @@ def start_inference_process(
     very_high_memory_mode: bool = False,
     amd_gpu: bool = False,
     directml: int | None = None,
+    vram_heavy_models: bool = False,
 ) -> None:
     """Start an inference process.
 
@@ -47,6 +48,7 @@ def start_inference_process(
             Defaults to False.
         directml (int | None, optional): If not None, the process will attempt to use DirectML \
             with the specified device
+        vram_heavy_models (bool, optional): If true, the process will attempt to reserve more VRAM. Defaults to False.
     """
     with contextlib.nullcontext():  # contextlib.redirect_stdout(None), contextlib.redirect_stderr(None):
         logger.remove()
@@ -96,8 +98,16 @@ def start_inference_process(
                         "cascade",
                     ],
                 )
-            else:
+            elif not vram_heavy_models:
+                logger.info("Reserving 1.4GB VRAM.")
                 extra_comfyui_args.extend(["--reserve-vram", "1.4"])
+
+            if high_memory_mode and vram_heavy_models:
+                logger.info("High memory mode and vram heavy models are both enabled. Reserving 6GB VRAM.")
+                extra_comfyui_args.extend(["--reserve-vram", "6"])
+
+            if "--reserve-vram" not in extra_comfyui_args:
+                logger.warning("No VRAM reservation specified.")
 
             with logger.catch(reraise=True):
                 logger.debug(f"Using extra comfyui args: {extra_comfyui_args}")

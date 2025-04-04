@@ -1035,6 +1035,22 @@ class LRUCache:
         return bumped
 
 
+class APIWorkerMessage(BaseModel):
+    """A message sent to the worker from the API."""
+
+    message_id: str
+    """The ID of the message."""
+
+    message_text: str | None
+    """The text of the message."""
+
+    message_origin: str | None
+    """The origin (author) of the message."""
+
+    message_expiry: str | None
+    """The expiry time of the message."""
+
+
 class HordeWorkerProcessManager:
     """Manages and controls processes to act as a horde worker."""
 
@@ -1231,6 +1247,8 @@ class HordeWorkerProcessManager:
     _directml: int | None
     """ID of the potential directml device."""
 
+    _api_messages_received: dict[str, APIWorkerMessage]
+
     @property
     def post_process_job_overlap_allowed(self) -> bool:
         """Return true if post processing jobs are allowed to overlap."""
@@ -1354,7 +1372,11 @@ class HordeWorkerProcessManager:
 
         self.enable_performance_mode()
         if self.bridge_data.remove_maintenance_on_init:
-            self.remove_maintenance()
+            try:
+                self.remove_maintenance()
+            except Exception as e:
+                logger.warning(e)
+                logger.warning("Error trying to unset maintenance. Did this worker not exist yet?")
 
         # Get the total memory of each GPU
         import torch
@@ -1379,6 +1401,8 @@ class HordeWorkerProcessManager:
         self._process_message_queue = multiprocessing.Queue()
 
         self.kudos_events: list[tuple[float, float]] = []
+
+        self._api_messages_received = {}
 
         self.stable_diffusion_reference = None
 
@@ -1610,6 +1634,8 @@ class HordeWorkerProcessManager:
         :return:
         """
         logger.info(f"Starting inference process on PID {pid}")
+        vram_heavy_models = any(model in VRAM_HEAVY_MODELS for model in self.bridge_data.image_models_to_load)
+
         pipe_connection, child_pipe_connection = multiprocessing.Pipe(duplex=True)
         # Create a new process that will run the start_inference_process function
         process = multiprocessing.Process(
@@ -1629,6 +1655,7 @@ class HordeWorkerProcessManager:
                 "high_memory_mode": self.bridge_data.high_memory_mode,
                 "amd_gpu": self._amd_gpu,
                 "directml": self._directml,
+                "vram_heavy_models": vram_heavy_models,
             },
         )
         process.start()
@@ -2980,6 +3007,13 @@ class HordeWorkerProcessManager:
                     timeout=aiohttp.ClientTimeout(total=10),
                     ssl=sslcontext,
                 ) as response:
+                    if response.status == 500:
+                        logger.warning(
+                            "Retrying upload to R2. This is a cloudflare issue and only is a concern if "
+                            "you see this message 5 or more times a minute.",
+                        )
+                        new_submit.retry()
+                        return False
                     if response.status != 200:
                         logger.error(f"Failed to upload image to R2: {response}")
                         new_submit.retry()
@@ -3956,6 +3990,33 @@ class HordeWorkerProcessManager:
                 job_pop_request,
                 ImageGenerateJobPopResponse,
             )
+            try:
+                if (
+                    hasattr(job_pop_response, "messages")
+                    and job_pop_response.messages is not None
+                    and len(job_pop_response.messages) > 0
+                ):
+                    for message in job_pop_response.messages:
+                        message_id = message.get("id", None)
+                        message_text = str(message.get("message", None))
+                        message_origin = message.get("origin", None)
+                        message_expiry = message.get("expiry", None)
+
+                        if message_id not in self._api_messages_received:
+                            if message_id is not None:
+                                message_id = str(message_id)
+                            self._api_messages_received[message_id] = APIWorkerMessage(
+                                message_id=message_id,
+                                message_text=message_text,
+                                message_origin=message_origin,
+                                message_expiry=message_expiry,
+                            )
+                            logger.debug(
+                                f"Message {message_id} from {message_origin} (expires {message_expiry}): "
+                                f"{message_text}",
+                            )
+            except Exception as e:
+                logger.error(f"Failed to process API messages: {e}")
 
             # TODO: horde_sdk should handle this and return a field with a enum(?) of the reason
             if isinstance(job_pop_response, RequestErrorResponse):
@@ -4199,21 +4260,26 @@ class HordeWorkerProcessManager:
         Args:
             kudos_info_string (str): The kudos information string to log.
         """
+        log_function = logger.opt(ansi=True).info
+
+        if self.bridge_data.limited_console_messages:
+            log_function = logger.opt(ansi=True).success
+
         if self.kudos_generated_this_session > 0:
-            logger.opt(ansi=True).info(
+            log_function(
                 f"<fg #7dcea0>{kudos_info_string}</>",
             )
 
         logger.debug(f"len(kudos_events): {len(self.kudos_events)}")
         if self.user_info is not None and self.user_info.kudos_details is not None:
-            logger.opt(ansi=True).info(
+            log_function(
                 "<fg #7dcea0>"
                 f"Total Kudos Accumulated: {self.user_info.kudos_details.accumulated:,.2f} "
                 f"(all workers for {self.user_info.username})"
                 "</>",
             )
             if self.user_info.kudos_details.accumulated is not None and self.user_info.kudos_details.accumulated < 0:
-                logger.opt(ansi=True).info(
+                log_function(
                     "<fg #7dcea0>"
                     "Negative kudos means you've requested more than you've earned. This can be normal."
                     "</>",
@@ -4439,7 +4505,9 @@ class HordeWorkerProcessManager:
                     ):
                         await asyncio.sleep(self._loop_interval)
                         self.receive_and_handle_process_messages()
-                        self.replace_hung_processes()
+                        if self.replace_hung_processes():
+                            await asyncio.sleep(self._loop_interval / 2)
+                            await asyncio.sleep(self._loop_interval / 2)
                         self._replace_all_safety_process()
 
                     if self._shutting_down and not self._last_pop_recently():
@@ -4598,6 +4666,29 @@ class HordeWorkerProcessManager:
             process_info_strings = self._process_map.get_process_info_strings()
 
             logging_function("<fg #dddddd>" + str("^" * 80) + "</>")
+
+            if len(self._api_messages_received) > 0:
+                logging_function("<b>API Messages:</b>")
+                for message_id, message in self._api_messages_received.items():
+                    try:
+                        message_text = message.message_text or ""
+                        log_safe_message = message_text.replace("<", "&lt;").replace(">", "&gt;")
+                        log_safe_message = log_safe_message.replace("\n", " ")
+                        log_safe_message = log_safe_message.replace("\r", " ")
+                        log_safe_message = log_safe_message.replace("\t", " ")
+                        log_safe_message = log_safe_message.replace("{", "{{").replace("}", "}}")
+                        log_safe_message = log_safe_message.replace('"', "'")
+                        log_safe_message = log_safe_message.replace("'", "'")
+
+                        logging_function(
+                            f"  <fg #000><bg #0ff127>{log_safe_message} "
+                            f"(from {message.message_origin}, expires {message.message_expiry}, "
+                            f"message_id: {message_id[:8]})</></>",
+                            "</></>",
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to print API message: {e}")
+
             logging_function("<b>Process info:</b>")
             for process_info_string in process_info_strings:
                 logging_function("  " + process_info_string)
@@ -5152,6 +5243,7 @@ class HordeWorkerProcessManager:
             for process_info in self._process_map.values():
                 if process_info.process_type == HordeProcessType.INFERENCE:
                     self._replace_inference_process(process_info)
+                    self._any_replaced = True
 
             threading.Thread(target=timed_unset_recently_recovered).start()
         else:
