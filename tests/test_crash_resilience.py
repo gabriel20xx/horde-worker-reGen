@@ -112,7 +112,7 @@ class TestReplaceHungProcessesAnyReplaced:
             result = bound_method()
 
         assert result is True
-        mock_manager._replace_inference_process.assert_called_once_with(mock_process)
+        mock_manager._replace_inference_process.assert_called_once_with(mock_process, respawn=True)
 
     def test_inference_processing_detected_even_when_recently_recovered(self) -> None:
         """INFERENCE_PROCESSING stuck detection must fire even when _recently_recovered is True.
@@ -165,7 +165,58 @@ class TestReplaceHungProcessesAnyReplaced:
             "replace_hung_processes must return True for a stuck INFERENCE_PROCESSING process "
             "even when _recently_recovered is True"
         )
-        mock_manager._replace_inference_process.assert_called_once_with(mock_process)
+        mock_manager._replace_inference_process.assert_called_once_with(mock_process, respawn=True)
+
+    def test_timeout_exceeded_during_shutdown_does_not_respawn(self) -> None:
+        """A process that blows past inference_timeout while shutting down must be replaced
+
+        without spawning a fresh subprocess: a brand-new process needs to import torch and set
+        up the model manager, which routinely takes longer than the graceful-shutdown window and
+        forces the watchdog in `_start_timed_shutdown()` to hard-kill the worker before the new
+        process even finishes starting.
+        """
+        from horde_worker_regen.process_management.process_manager import HordeWorkerProcessManager
+
+        import time
+
+        mock_manager = MagicMock()
+        mock_manager._recently_recovered = False
+        mock_manager._last_pop_no_jobs_available = False
+        mock_manager._job_pops_paused = False
+        mock_manager._shutting_down = True
+        mock_manager._shutting_down_time = time.time()
+        mock_manager.bridge_data.inference_step_timeout = 60
+        mock_manager.bridge_data.inference_timeout = 120
+        mock_manager.bridge_data.waiting_for_job_timeout = 600
+        mock_manager.bridge_data.force_restart_timeout = 60
+        mock_manager._reap_orphaned_in_progress_jobs.return_value = False
+        mock_manager.max_concurrent_inference_processes = 1
+        mock_manager.post_process_job_overlap_allowed = False
+        mock_manager.bridge_data.process_timeout = 600
+
+        mock_process = MagicMock()
+        mock_process.process_id = 3
+        mock_process.last_process_state = HordeProcessState.INFERENCE_PROCESSING
+        mock_process.inference_started_timestamp = time.time() - 406.8
+        mock_process.last_heartbeat_percent_complete = 50
+        mock_process.last_job_referenced = None
+        mock_process.last_heartbeat_delta = 1
+        mock_process.last_progress_timestamp = time.time() - 1
+        mock_process.last_received_timestamp = time.time() - 1
+        mock_process.last_heartbeat_timestamp = time.time() - 1
+
+        mock_manager._process_map.values.return_value = [mock_process]
+        mock_manager._process_map.is_stuck_on_inference.return_value = False
+
+        bound_method = HordeWorkerProcessManager.replace_hung_processes.__get__(
+            mock_manager, HordeWorkerProcessManager
+        )
+
+        with patch("threading.Thread"):
+            result = bound_method()
+
+        assert result is True
+        mock_manager._replace_inference_process.assert_called_once_with(mock_process, respawn=False)
 
     def test_stuck_process_ending_slot_is_recovered_when_capacity_is_below_target(self) -> None:
         """A stale PROCESS_ENDING slot should be replaced when active capacity is below max."""
@@ -4110,6 +4161,73 @@ class TestReplaceInferenceProcessReleasesVAEDecodeSemaphore:
             "— the VAE semaphore is not held at that stage"
         )
 
+    def test_respawn_false_skips_starting_new_process(self) -> None:
+        """respawn=False must end the old process without starting a replacement.
+
+        This is the shutdown path: spawning a fresh subprocess (importing torch, setting up the
+        model manager) routinely takes longer than the graceful-shutdown window, which forces the
+        watchdog to hard-kill the worker before the new process even finishes starting.
+        """
+        import multiprocessing
+
+        from horde_worker_regen.process_management.process_manager import HordeWorkerProcessManager
+
+        ctx = multiprocessing.get_context("spawn")
+
+        process_info = MagicMock()
+        process_info.last_process_state = HordeProcessState.INFERENCE_PROCESSING
+        process_info.inference_started_timestamp = None
+        process_info.last_job_referenced = None
+        process_info.loaded_horde_model_name = None
+
+        mock_manager = MagicMock()
+        mock_manager._inference_semaphore = ctx.BoundedSemaphore(1)
+        mock_manager._vae_decode_semaphore = ctx.BoundedSemaphore(1)
+        mock_manager._disk_lock = ctx.Lock()
+        mock_manager.jobs_lookup = {}
+        mock_manager.jobs_in_progress = []
+        mock_manager._num_process_recoveries = 0
+
+        bound = HordeWorkerProcessManager._replace_inference_process.__get__(
+            mock_manager, HordeWorkerProcessManager
+        )
+        bound(process_info, respawn=False)
+
+        mock_manager._start_inference_process.assert_not_called()
+        assert mock_manager._num_process_recoveries == 0
+        mock_manager._end_inference_process.assert_called_once_with(process_info)
+
+    def test_respawn_true_default_starts_new_process(self) -> None:
+        """respawn=True (the default) must behave exactly as before: start a replacement."""
+        import multiprocessing
+
+        from horde_worker_regen.process_management.process_manager import HordeWorkerProcessManager
+
+        ctx = multiprocessing.get_context("spawn")
+
+        process_info = MagicMock()
+        process_info.process_id = 5
+        process_info.last_process_state = HordeProcessState.INFERENCE_PROCESSING
+        process_info.inference_started_timestamp = None
+        process_info.last_job_referenced = None
+        process_info.loaded_horde_model_name = None
+
+        mock_manager = MagicMock()
+        mock_manager._inference_semaphore = ctx.BoundedSemaphore(1)
+        mock_manager._vae_decode_semaphore = ctx.BoundedSemaphore(1)
+        mock_manager._disk_lock = ctx.Lock()
+        mock_manager.jobs_lookup = {}
+        mock_manager.jobs_in_progress = []
+        mock_manager._num_process_recoveries = 0
+
+        bound = HordeWorkerProcessManager._replace_inference_process.__get__(
+            mock_manager, HordeWorkerProcessManager
+        )
+        bound(process_info)
+
+        mock_manager._start_inference_process.assert_called_once_with(5)
+        assert mock_manager._num_process_recoveries == 1
+
 
 class TestNumBusyWithPostProcessing:
     """Tests that num_busy_with_post_processing() counts both INFERENCE_POST_PROCESSING
@@ -7547,7 +7665,7 @@ class TestReplaceHungProcessesPausedPops:
         assert result is True, (
             "INFERENCE_PROCESSING stuck detection must fire even when job pops are paused"
         )
-        mock_manager._replace_inference_process.assert_called_once_with(proc)
+        mock_manager._replace_inference_process.assert_called_once_with(proc, respawn=True)
 
 
 class TestInferenceBackgroundHeartbeat:
@@ -10303,3 +10421,50 @@ class TestReplaceHungJobReceivedAndDownloading:
         assert HordeProcessState.JOB_RECEIVED not in called_states, (
             "JOB_RECEIVED check must be skipped when no jobs are available"
         )
+
+
+class TestReplaceAllSafetyProcessRespectsShutdown:
+    """_replace_all_safety_process() must not spawn a new safety process during shutdown.
+
+    A safety process spawned mid-shutdown has nothing left to evaluate and is just an extra
+    subprocess for the shutdown/watchdog path to kill, the same bug class as the inference-process
+    respawn-during-shutdown issue this module also tests.
+    """
+
+    def _make_manager(self, *, shutting_down: bool) -> MagicMock:
+        from horde_worker_regen.process_management.process_manager import HordeWorkerProcessManager
+
+        mock_manager = MagicMock()
+        mock_manager._shutting_down = shutting_down
+        mock_manager._safety_processes_should_be_replaced = True
+        mock_manager._safety_processes_ending = True
+        mock_manager._num_process_recoveries = 0
+        mock_manager._process_map.num_loaded_safety_processes.return_value = 0
+        mock_manager._process_map.num_safety_processes.return_value = 0
+
+        mock_manager._replace_all_safety_process = (
+            HordeWorkerProcessManager._replace_all_safety_process.__get__(
+                mock_manager, HordeWorkerProcessManager
+            )
+        )
+        return mock_manager
+
+    def test_does_not_start_safety_process_while_shutting_down(self) -> None:
+        mock_manager = self._make_manager(shutting_down=True)
+
+        mock_manager._replace_all_safety_process()
+
+        mock_manager.start_safety_processes.assert_not_called()
+        assert mock_manager._safety_processes_ending is False
+        assert mock_manager._safety_processes_should_be_replaced is False
+        assert mock_manager._num_process_recoveries == 0
+
+    def test_starts_safety_process_when_not_shutting_down(self) -> None:
+        mock_manager = self._make_manager(shutting_down=False)
+
+        mock_manager._replace_all_safety_process()
+
+        mock_manager.start_safety_processes.assert_called_once()
+        assert mock_manager._safety_processes_ending is False
+        assert mock_manager._safety_processes_should_be_replaced is False
+        assert mock_manager._num_process_recoveries == 1

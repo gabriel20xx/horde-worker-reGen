@@ -3260,16 +3260,25 @@ class HordeWorkerProcessManager:
             and self._process_map.num_loaded_safety_processes() == 0
             and self._process_map.num_safety_processes() == 0
         ):
-            self.start_safety_processes()
             self._safety_processes_ending = False
             self._safety_processes_should_be_replaced = False
-            self._num_process_recoveries += 1
+            # Don't respawn while shutting down: a safety process spawned here has nothing
+            # left to evaluate and is just an unwanted new subprocess for the shutdown/watchdog
+            # path to kill (same reasoning as _replace_inference_process's respawn param).
+            if not self._shutting_down:
+                self.start_safety_processes()
+                self._num_process_recoveries += 1
 
-    def _replace_inference_process(self, process_info: HordeProcessInfo) -> None:
+    def _replace_inference_process(self, process_info: HordeProcessInfo, respawn: bool = True) -> None:
         """Replaces an inference process (for whatever reason; probably because it crashed).
 
         Args:
             process_info: The process to replace.
+            respawn: Whether to start a fresh subprocess in its place. Callers pass False while
+                shutting down: spawning a brand-new process (which must import torch and set up
+                the model manager from scratch) mid-shutdown routinely takes longer than the
+                graceful-shutdown window, forcing the watchdog in `_start_timed_shutdown()` to
+                hard-kill the worker before the new process even finishes starting.
         """
         logger.debug(f"Replacing {process_info}")
         # job = next(((job, pid) for job, pid in self.jobs_in_progress if pid == process_info.process_id), None)
@@ -3441,9 +3450,9 @@ class HordeWorkerProcessManager:
                 "when replacing INFERENCE_PROCESSING process at 100% progress",
             )
 
-        self._start_inference_process(process_info.process_id)
-
-        self._num_process_recoveries += 1
+        if respawn:
+            self._start_inference_process(process_info.process_id)
+            self._num_process_recoveries += 1
 
     total_num_completed_jobs: int = 0
     """The total number of jobs that have been completed."""
@@ -9896,7 +9905,11 @@ class HordeWorkerProcessManager:
                     "replacing immediately",
                 )
                 if process_info.process_type == HordeProcessType.INFERENCE:
-                    self._replace_inference_process(process_info)
+                    # Don't respawn while shutting down: end_inference_processes()/hard_shutdown
+                    # will finish tearing everything down, and a freshly spawned process would
+                    # just be an unwanted new subprocess to kill (see _replace_inference_process's
+                    # respawn docstring).
+                    self._replace_inference_process(process_info, respawn=not self._shutting_down)
                     any_replaced = any_process_replaced = True
                 elif process_info.process_type == HordeProcessType.SAFETY:
                     # Only set the flag — do NOT call _replace_all_safety_process() here.
@@ -9966,7 +9979,7 @@ class HordeWorkerProcessManager:
                     f"{process_info} exceeded total inference_timeout of {self.bridge_data.inference_timeout}s "
                     f"(running for {total_elapsed:.1f}s) — replacing.",
                 )
-                self._replace_inference_process(process_info)
+                self._replace_inference_process(process_info, respawn=not self._shutting_down)
                 any_replaced = any_process_replaced = True
 
             elif is_stuck_inference:
@@ -9985,7 +9998,7 @@ class HordeWorkerProcessManager:
                     f"Progress: {progress_str}, "
                     f"Job: {process_info.last_job_referenced.id_ if process_info.last_job_referenced else 'None'}",
                 )
-                self._replace_inference_process(process_info)
+                self._replace_inference_process(process_info, respawn=not self._shutting_down)
                 any_replaced = any_process_replaced = True
             else:
                 # Check PROCESS_STARTING first - this should always be checked regardless of job availability
