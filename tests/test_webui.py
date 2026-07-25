@@ -1,6 +1,7 @@
 """Simple test to verify the web UI server can be created and started."""
 
 import asyncio
+import base64
 import pathlib
 
 import aiohttp
@@ -579,11 +580,12 @@ async def test_webui_gallery_thumbnail_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_webui_gallery_thumbnails_by_ids() -> None:
-    """Test that /api/gallery/thumbnails returns only the requested ids, in either order.
+async def test_webui_gallery_thumb_binary() -> None:
+    """Test that /api/gallery/thumb/{id} serves raw, cacheable image bytes.
 
-    This backs the gallery grid's viewport-based lazy loading: the client requests thumbnails
-    for whichever tiles just scrolled into view rather than the whole page.
+    This backs the gallery grid: each tile is a real <img src="/api/gallery/thumb/{id}">, so the
+    browser's native lazy-loading and HTTP cache do the work instead of custom JS -- revisiting a
+    page, or even a full reload, is served from the browser's own cache.
     """
     webui = WorkerWebUI(port=0)
 
@@ -595,43 +597,39 @@ async def test_webui_gallery_thumbnails_by_ids() -> None:
         test_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         )
+        thumb_b64 = base64.b64encode(b"fake-jpeg-thumbnail-bytes").decode("ascii")
 
-        webui._gallery_dict[0] = {"gallery_id": 0, "base64": test_b64, "thumbnail": "thumb0", "timestamp": 1.0, "model": "m1"}
+        webui._gallery_dict[0] = {"gallery_id": 0, "base64": test_b64, "thumbnail": thumb_b64, "timestamp": 1.0, "model": "m1"}
         webui._gallery_dict[1] = {"gallery_id": 1, "base64": test_b64, "timestamp": 2.0, "model": "m2"}
-        webui._gallery_dict[2] = {"gallery_id": 2, "base64": test_b64, "thumbnail": "thumb2", "timestamp": 3.0, "model": "m3"}
 
+        # A thumbnail is served as raw JPEG bytes with a far-future, immutable cache header.
         async with aiohttp.ClientSession() as session, session.get(
-            f"http://localhost:{actual_port}/api/gallery/thumbnails?ids=0,2,9999",
+            f"http://localhost:{actual_port}/api/gallery/thumb/0",
         ) as response:
             assert response.status == 200
-            data = await response.json()
+            assert response.headers["Content-Type"] == "image/jpeg"
+            assert "immutable" in response.headers["Cache-Control"]
+            body = await response.read()
+        assert body == base64.b64decode(thumb_b64)
 
-        images_by_id = {img["gallery_id"]: img for img in data["images"]}
-        assert set(images_by_id) == {0, 2}, "only requested ids that exist should be returned"
-        assert images_by_id[0]["thumbnail"] == "thumb0"
-        assert "base64" not in images_by_id[0], "thumbnail present means base64 must be omitted"
-        assert images_by_id[2]["thumbnail"] == "thumb2"
-
-        # An id without a thumbnail falls back to full-resolution base64.
+        # No thumbnail available -> falls back to full-resolution PNG bytes.
         async with aiohttp.ClientSession() as session, session.get(
-            f"http://localhost:{actual_port}/api/gallery/thumbnails?ids=1",
+            f"http://localhost:{actual_port}/api/gallery/thumb/1",
         ) as response:
             assert response.status == 200
-            data = await response.json()
-        assert data["images"][0]["gallery_id"] == 1
-        assert data["images"][0]["base64"] == test_b64
+            assert response.headers["Content-Type"] == "image/png"
+            body = await response.read()
+        assert body == base64.b64decode(test_b64)
 
-        # Empty/missing ids param yields an empty result rather than an error.
+        # Non-existent gallery_id -> 404.
         async with aiohttp.ClientSession() as session, session.get(
-            f"http://localhost:{actual_port}/api/gallery/thumbnails",
+            f"http://localhost:{actual_port}/api/gallery/thumb/9999",
         ) as response:
-            assert response.status == 200
-            data = await response.json()
-        assert data["images"] == []
+            assert response.status == 404
 
-        # Malformed ids param is a client error.
+        # Malformed gallery_id -> 400.
         async with aiohttp.ClientSession() as session, session.get(
-            f"http://localhost:{actual_port}/api/gallery/thumbnails?ids=abc",
+            f"http://localhost:{actual_port}/api/gallery/thumb/abc",
         ) as response:
             assert response.status == 400
     finally:
@@ -639,8 +637,44 @@ async def test_webui_gallery_thumbnails_by_ids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_webui_gallery_thumbnails_by_ids_db_fallback(tmp_path: pathlib.Path) -> None:
-    """Test that /api/gallery/thumbnails falls back to the gallery DB for evicted thumbnails."""
+async def test_webui_gallery_full_binary() -> None:
+    """Test that /api/gallery/full/{id} serves raw, cacheable full-resolution PNG bytes.
+
+    This backs the overlay viewer: <img src="/api/gallery/full/{id}"> instead of a JSON+base64
+    fetch, so reopening an already-viewed image is served instantly from the browser's cache.
+    """
+    webui = WorkerWebUI(port=0)
+
+    try:
+        await webui.start()
+        await asyncio.sleep(0.5)
+        actual_port = webui.site._server.sockets[0].getsockname()[1] if webui.site else 0
+
+        test_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        webui._gallery_dict[0] = {"gallery_id": 0, "base64": test_b64, "timestamp": 1.0, "model": "m1"}
+
+        async with aiohttp.ClientSession() as session, session.get(
+            f"http://localhost:{actual_port}/api/gallery/full/0",
+        ) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "image/png"
+            assert "immutable" in response.headers["Cache-Control"]
+            body = await response.read()
+        assert body == base64.b64decode(test_b64)
+
+        async with aiohttp.ClientSession() as session, session.get(
+            f"http://localhost:{actual_port}/api/gallery/full/9999",
+        ) as response:
+            assert response.status == 404
+    finally:
+        await webui.stop()
+
+
+@pytest.mark.asyncio
+async def test_webui_gallery_thumb_binary_db_fallback(tmp_path: pathlib.Path) -> None:
+    """Test that /api/gallery/thumb/{id} falls back to the gallery DB for evicted thumbnails."""
     webui = WorkerWebUI(port=0, db_path=str(tmp_path))
 
     try:
@@ -663,14 +697,12 @@ async def test_webui_gallery_thumbnails_by_ids_db_fallback(tmp_path: pathlib.Pat
         webui._gallery_dict[0].pop("base64", None)
 
         async with aiohttp.ClientSession() as session, session.get(
-            f"http://localhost:{actual_port}/api/gallery/thumbnails?ids=0",
+            f"http://localhost:{actual_port}/api/gallery/thumb/0",
         ) as response:
             assert response.status == 200
-            data = await response.json()
-
-        assert len(data["images"]) == 1
-        assert data["images"][0]["gallery_id"] == 0
-        assert data["images"][0]["thumbnail"] == persisted_thumbnail
+            assert response.headers["Content-Type"] == "image/jpeg"
+            body = await response.read()
+        assert body == base64.b64decode(persisted_thumbnail)
     finally:
         await webui.stop()
 

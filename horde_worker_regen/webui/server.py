@@ -1180,7 +1180,8 @@ class WorkerWebUI:
         self.app.router.add_post("/api/errors/clear", self._handle_errors_clear)
         self.app.router.add_get("/api/last_image", self._handle_last_image)
         self.app.router.add_get("/api/gallery", self._handle_gallery)
-        self.app.router.add_get("/api/gallery/thumbnails", self._handle_gallery_thumbnails)
+        self.app.router.add_get("/api/gallery/thumb/{gallery_id}", self._handle_gallery_thumb_binary)
+        self.app.router.add_get("/api/gallery/full/{gallery_id}", self._handle_gallery_full_binary)
         self.app.router.add_get("/api/gallery/models", self._handle_gallery_models)
         self.app.router.add_get("/api/gallery/safety", self._handle_gallery_safety)
         self.app.router.add_get("/api/gallery/image", self._handle_gallery_image)
@@ -2852,12 +2853,11 @@ class WorkerWebUI:
             if (btn) btn.classList.add('active');
         })();
         let overlayImages = [], overlayIndex = -1;
-        // When non-null, holds the stable gallery_id values for the current overlay page
-        // so images can be fetched lazily via /api/gallery/image.
+        // When non-null, holds the stable gallery_id values for the current overlay page so the
+        // full-resolution image can be requested directly via /api/gallery/full/{id} -- a real
+        // <img> URL, so the browser's native loading + HTTP cache apply (reopening an
+        // already-viewed image is served instantly from cache, no fetch/JSON round trip).
         let _galleryOverlayIds = null;
-        // AbortController for the in-flight overlay image fetch; prevents stale responses
-        // from overwriting the overlay when the user navigates quickly.
-        let _overlayFetchController = null;
         function _updateOverlayNav() {
             const hasList = overlayImages.length > 1;
             const pb = document.getElementById('overlay-prev'), nb = document.getElementById('overlay-next');
@@ -2874,29 +2874,23 @@ class WorkerWebUI:
                 overlayIndex = safeIndex;
             } else { overlayImages = []; overlayIndex = -1; }
             _galleryOverlayIds = null;
-            if (_overlayFetchController) { _overlayFetchController.abort(); _overlayFetchController = null; }
             document.getElementById('overlay-image').src = imageSrc;
             document.getElementById('image-overlay').classList.add('active');
             _updateOverlayNav();
         }
-        function _loadGalleryOverlayImage(galleryId) {
-            if (_overlayFetchController) _overlayFetchController.abort();
-            _overlayFetchController = new AbortController();
-            const ctrl = _overlayFetchController;
-            // Pause any in-flight background gallery-thumbnail batch fetch so the
-            // full-resolution image the user is looking at gets network priority instead
-            // of competing with it; resumed in closeImageOverlay() once the overlay shuts.
-            if (_galleryBatchAbort) { _galleryBatchAbort.abort(); _galleryBatchAbort = null; }
+        // Points the overlay <img> straight at /api/gallery/full/{id}: the browser handles
+        // loading, decoding, prioritization (fetchPriority), and caching natively, so there is no
+        // manual fetch/AbortController bookkeeping -- setting a new src simply supersedes
+        // whatever the element was previously loading.
+        function _showGalleryOverlayImage(galleryId) {
             const el = document.getElementById('overlay-image');
             const content = document.getElementById('overlay-content');
             content.classList.add('is-loading');
-            fetch('/api/gallery/image?id=' + galleryId, { signal: ctrl.signal, priority: 'high' })
-                .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-                .then(function(data) { if (ctrl !== _overlayFetchController) return; el.src = 'data:image/png;base64,' + data.base64; content.classList.remove('is-loading'); })
-                .catch(function(err) { if (err.name === 'AbortError') { if (ctrl === _overlayFetchController) content.classList.remove('is-loading'); return; } console.error('Failed to load gallery image:', err); content.classList.remove('is-loading'); });
+            el.fetchPriority = 'high';
+            el.onload = el.onerror = function() { content.classList.remove('is-loading'); };
+            el.src = '/api/gallery/full/' + galleryId;
         }
         function openGalleryImageOverlay(galleryId, galleryIds, localIdx) {
-            if (_overlayFetchController) { _overlayFetchController.abort(); _overlayFetchController = null; }
             if (Array.isArray(galleryIds) && galleryIds.length > 0) {
                 overlayImages = galleryIds;
                 overlayIndex = localIdx;
@@ -2906,35 +2900,25 @@ class WorkerWebUI:
                 overlayIndex = 0;
                 _galleryOverlayIds = [galleryId];
             }
-            document.getElementById('overlay-image').src = '';
             document.getElementById('image-overlay').classList.add('active');
             _updateOverlayNav();
-            _loadGalleryOverlayImage(galleryId);
+            _showGalleryOverlayImage(galleryId);
         }
         function overlayNavigate(delta) {
             const ni = overlayIndex + delta;
             if (ni < 0 || ni >= overlayImages.length) return;
             overlayIndex = ni;
             if (_galleryOverlayIds !== null) {
-                _loadGalleryOverlayImage(_galleryOverlayIds[overlayIndex]);
+                _showGalleryOverlayImage(_galleryOverlayIds[overlayIndex]);
             } else {
                 document.getElementById('overlay-image').src = overlayImages[overlayIndex];
             }
             _updateOverlayNav();
         }
         function closeImageOverlay() {
-            if (_overlayFetchController) { _overlayFetchController.abort(); _overlayFetchController = null; }
             document.getElementById('overlay-content').classList.remove('is-loading');
             document.getElementById('image-overlay').classList.remove('active');
-            const wasGalleryOverlay = _galleryOverlayIds !== null;
             overlayImages = []; overlayIndex = -1; _galleryOverlayIds = null;
-            // Visible-tile lazy loading (_observeGalleryTilesForVisibility) isn't paused by the
-            // overlay — only the legacy whole-page batch fetch was, so resuming is only needed
-            // on the IntersectionObserver-less fallback path (loadGalleryThumbnails skips ids
-            // already cached, so this is a no-op if the batch had already finished).
-            if (wasGalleryOverlay && _currentPageGalleryIds.length > 0 && typeof IntersectionObserver === 'undefined') {
-                loadGalleryThumbnails(_currentPageGalleryIds);
-            }
         }
         document.getElementById('image-overlay').addEventListener('click', function(e) { if (e.target === this) closeImageOverlay(); });
         document.addEventListener('keydown', function(e) {
@@ -3404,19 +3388,9 @@ class WorkerWebUI:
         // Set to true when new images arrive while the gallery tab is not active.
         // Consumed by showPage() to refresh or show the banner on return.
         let galleryHasUnseenImages = false;
-        // Monotonically increasing batch ID used to cancel stale thumbnail loads when the
-        // page changes before the previous batch has finished.
-        let _galleryThumbnailBatchId = 0;
-        // AbortController for the currently running thumbnail batch; aborted when the page changes.
-        let _galleryBatchAbort = null;
         // Ordered list of gallery_ids for the currently displayed page; used by overlay navigation.
         // Stored at module scope so incremental updates (refreshGalleryPage1) keep it in sync.
         let _currentPageGalleryIds = [];
-        // Client-side cache: gallery_id (integer) → thumbnail data-URL string.
-        // Avoids re-fetching thumbnails when the user switches pages or returns to the gallery tab.
-        // Evicts the oldest entry once the cache exceeds _GALLERY_THUMBNAIL_CACHE_MAX to bound memory.
-        const _galleryThumbnailCache = new Map();
-        const _GALLERY_THUMBNAIL_CACHE_MAX = 1000;
         const GALLERY_VALID_COLS = [1, 2, 3, 4, 6, 12];
         const GALLERY_MIN_ITEM_PX = 160;
         const GALLERY_GRID_GAP_PX = 10;
@@ -3437,12 +3411,6 @@ class WorkerWebUI:
             _galleryResizeObserver = new ResizeObserver(function() { updateGalleryColumns(); });
             const _galleryGridEl = document.getElementById('gallery-grid');
             if (_galleryGridEl) _galleryResizeObserver.observe(_galleryGridEl);
-        }
-        function _cacheThumbnail(galleryId, dataUrl) {
-            _galleryThumbnailCache.set(galleryId, dataUrl);
-            if (_galleryThumbnailCache.size > _GALLERY_THUMBNAIL_CACHE_MAX) {
-                _galleryThumbnailCache.delete(_galleryThumbnailCache.keys().next().value);
-            }
         }
         function renderGalleryPageSkeleton(images, total, page, totalPages) {
             galleryTotalImages = total; galleryCurrentPage = page; galleryTotalPages = totalPages;
@@ -3465,8 +3433,13 @@ class WorkerWebUI:
                 const ts = formatTimestamp(img.timestamp), model = img.model ? escapeHtml(img.model) : '';
                 const isNsfw = img.is_nsfw === true, isCsam = img.is_csam === true;
                 const nsfwAttr = isNsfw ? ' data-nsfw="1"' : '', csamAttr = isCsam ? ' data-csam="1"' : '';
-                const cachedSrc = _galleryThumbnailCache.get(galleryId);
-                const validCache = cachedSrc && (cachedSrc.startsWith('data:image/jpeg;base64,') || cachedSrc.startsWith('data:image/png;base64,'));
+                // A real <img src="/api/gallery/thumb/ID"> lets the browser's native lazy-loading
+                // (loading="lazy") and HTTP cache do all the work: revisiting a page, switching
+                // view modes, or even reloading the whole app serves previously-seen thumbnails
+                // instantly from cache instead of re-fetching them (see
+                // _GALLERY_IMAGE_CACHE_HEADERS on the server -- gallery images are immutable
+                // once generated, so the cache never needs to revalidate).
+                const thumbSrc = '/api/gallery/thumb/'+galleryId;
                 if (isList) {
                     const tsLong = formatTimestampFull(img.timestamp);
                     const steps = img.inference_steps ? img.inference_steps + ' steps' : '';
@@ -3475,10 +3448,9 @@ class WorkerWebUI:
                     const posTitle = img.positive_prompt ? escapeHtml(img.positive_prompt) : '';
                     const negTitle = img.negative_prompt ? escapeHtml(img.negative_prompt) : '';
                     const flagBadges = (isNsfw || isCsam) ? '<div class="gallery-list-badges">'+(isCsam ? '<span class="image-flag-badge csam">CSAM</span>' : '')+(isNsfw ? '<span class="image-flag-badge nsfw">NSFW</span>' : '')+'</div>' : '';
-                    const imgHtml = validCache ? '<img alt="Generated image" src="'+cachedSrc+'" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" />' : '<img alt="Generated image" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" style="display:none;" />';
                     const row1 = (model || steps) ? '<div class="gallery-list-row1">'+(model ? '<span class="gallery-list-model">'+model+'</span>' : '')+(steps ? '<span class="gallery-list-steps">'+steps+'</span>' : '')+'</div>' : '';
-                    return '<div class="gallery-list-item'+(validCache ? '' : ' loading')+'"'+nsfwAttr+csamAttr+' data-gallery-id="'+galleryId+'">' +
-                        '<div class="gallery-list-thumb">'+imgHtml+'</div>' +
+                    return '<div class="gallery-list-item loading"'+nsfwAttr+csamAttr+' data-gallery-id="'+galleryId+'">' +
+                        '<div class="gallery-list-thumb"><img alt="Generated image" src="'+thumbSrc+'" loading="lazy" decoding="async" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" /></div>' +
                         '<div class="gallery-list-meta">' +
                         row1 +
                         (tsLong ? '<div class="gallery-list-ts">'+tsLong+'</div>' : '') +
@@ -3489,11 +3461,7 @@ class WorkerWebUI:
                 }
                 const flagBadges = (isNsfw || isCsam) ? '<div class="image-flag-badges">'+(isCsam ? '<span class="image-flag-badge csam">CSAM</span>' : '')+(isNsfw ? '<span class="image-flag-badge nsfw">NSFW</span>' : '')+'</div>' : '';
                 const cap = [ts, model].filter(Boolean).join(' \u00b7 ');
-                if (validCache) {
-                    return '<div class="image-grid-item" data-gallery-id="'+galleryId+'"'+nsfwAttr+csamAttr+'><img alt="Generated image" src="'+cachedSrc+'" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" />'+
-                        flagBadges+(cap ? '<div class="image-timestamp">'+cap+'</div>' : '')+'</div>';
-                }
-                return '<div class="image-grid-item loading" data-gallery-id="'+galleryId+'"'+nsfwAttr+csamAttr+'><img alt="Generated image" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" style="display:none;" />'+
+                return '<div class="image-grid-item loading" data-gallery-id="'+galleryId+'"'+nsfwAttr+csamAttr+'><img alt="Generated image" src="'+thumbSrc+'" loading="lazy" decoding="async" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" />'+
                     flagBadges+(cap ? '<div class="image-timestamp">'+cap+'</div>' : '')+'</div>';
             }).join('');
             grid.querySelectorAll('img[data-gallery-id]').forEach(img => {
@@ -3502,14 +3470,19 @@ class WorkerWebUI:
                     const localIdx = parseInt(this.getAttribute('data-idx') || '0', 10);
                     openGalleryImageOverlay(galleryId, _currentPageGalleryIds, localIdx);
                 };
+                // Stop the loading shimmer once the browser has actually resolved the thumbnail
+                // (loaded or failed) -- a cache hit fires 'load' almost immediately, an
+                // already-complete image (rare, but possible) needs no event at all.
+                const stopLoading = function() {
+                    const c = img.closest('.image-grid-item,.gallery-list-item');
+                    if (c) c.classList.remove('loading');
+                };
+                if (img.complete) stopLoading(); else { img.onload = stopLoading; img.onerror = stopLoading; }
             });
             const tp = Math.max(1, totalPages);
             pi.textContent = 'Page '+page+' of '+tp;
             pb.disabled = page <= 1; nb.disabled = page >= tp;
             pag.style.display = 'flex';
-            // Lazy-load: only fetch image data for tiles that actually scroll into view,
-            // instead of the whole page (up to 96 images) up front.
-            _observeGalleryTilesForVisibility();
         }
         function setGalleryView(mode) {
             galleryViewMode = mode;
@@ -3518,142 +3491,19 @@ class WorkerWebUI:
             var btn = document.getElementById('gallery-view-' + mode);
             if (btn) btn.classList.add('active');
             if (_galleryCurrentPageImages) {
-                // renderGalleryPageSkeleton() re-triggers visibility-based lazy loading itself.
                 renderGalleryPageSkeleton(_galleryCurrentPageImages, galleryTotalImages, galleryCurrentPage, galleryTotalPages);
             }
         }
-        // Stops the loading shimmer on the given tiles without populating an image — used both
-        // when a thumbnail batch request fails and for ids a successful response didn't cover.
-        function _clearGalleryTileLoadingState(galleryIds) {
-            galleryIds.forEach(galleryId => {
-                const container = document.querySelector('.image-grid-item[data-gallery-id="'+galleryId+'"],.gallery-list-item[data-gallery-id="'+galleryId+'"]');
-                if (container) container.classList.remove('loading');
-            });
-        }
-        // Applies a /api/gallery response's image entries to the currently rendered grid: caches
-        // each thumbnail and updates the matching <img> if it is present in the DOM. Shared by
-        // loadGalleryThumbnails() and fetchGalleryPage()'s concurrent thumbnail fetch so both
-        // paths stay in sync.
-        function _applyGalleryThumbnailBatch(images) {
-            (images || []).forEach(entry => {
-                const galleryId = entry.gallery_id;
-                const container = document.querySelector('.image-grid-item[data-gallery-id="'+galleryId+'"],.gallery-list-item[data-gallery-id="'+galleryId+'"]');
-                const imgEl = container ? container.querySelector('img[data-gallery-id="'+galleryId+'"]') : null;
-                const thumbSrc = entry.thumbnail ? 'data:image/jpeg;base64,'+entry.thumbnail : (entry.base64 ? 'data:image/png;base64,'+entry.base64 : null);
-                // Only cache actual JPEG thumbnails (Pillow-generated, small).
-                // When Pillow is absent the response falls back to full-resolution PNG;
-                // caching those would balloon memory for workers without Pillow.
-                if (entry.thumbnail && thumbSrc) { _cacheThumbnail(galleryId, thumbSrc); }
-                if (thumbSrc && imgEl) { imgEl.src = thumbSrc; imgEl.style.display = ''; }
-                // Always remove the shimmer class; if no image data was returned the tile
-                // shows as an empty placeholder rather than spinning indefinitely.
-                if (container) container.classList.remove('loading');
-            });
-        }
-        // Fallback path for browsers without IntersectionObserver support (see
-        // _observeGalleryTilesForVisibility): eagerly loads thumbnails for the whole page in
-        // one request instead of lazily loading only the tiles that are actually visible.
-        function loadGalleryThumbnails(galleryIds) {
-            // Increment the batch ID so any stale responses from a previous page are discarded.
-            const batchId = ++_galleryThumbnailBatchId;
-            // Abort any previous batch fetch (e.g. from the page just switched away from, or
-            // one paused to prioritize the overlay image — see _loadGalleryOverlayImage).
-            if (_galleryBatchAbort) { try { _galleryBatchAbort.abort(); } catch(_){} _galleryBatchAbort = null; }
-            // Skip ids already in cache — they were rendered directly by the skeleton.
-            const idsNeeded = galleryIds.filter(id => !_galleryThumbnailCache.has(id));
-            if (idsNeeded.length === 0) return;
-            // Re-request the current page without metadata_only: the server already batches
-            // thumbnail lookups (including the DB fallback for ones evicted from RAM) into a
-            // single response, so this is one HTTP round-trip for the whole page instead of
-            // one request per image.
-            const batchAbort = new AbortController();
-            _galleryBatchAbort = batchAbort;
-            const modelParam = galleryModelFilter ? '&model='+encodeURIComponent(galleryModelFilter) : '';
-            const safetyParam = gallerySafetyFilter ? '&safety='+encodeURIComponent(gallerySafetyFilter) : '';
-            fetch('/api/gallery?page='+galleryCurrentPage+'&page_size='+galleryPageSize+modelParam+safetyParam,
-                { signal: batchAbort.signal, priority: 'low' })
-                .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
-                .then(data => {
-                    if (batchId !== _galleryThumbnailBatchId) return;
-                    _applyGalleryThumbnailBatch(data.images);
-                })
-                .catch(err => {
-                    if (err.name === 'AbortError') return;
-                    console.error('Gallery thumbnail batch load error:', err);
-                    // On error, stop the shimmer for every tile still waiting so nothing spins forever.
-                    _clearGalleryTileLoadingState(idsNeeded);
-                });
-        }
-        // IntersectionObserver watching not-yet-loaded gallery tiles; (re)created for each page
-        // render by _observeGalleryTilesForVisibility(). Kept at module scope so it can be
-        // disconnected before a fresh set of tiles is observed.
-        let _galleryVisibilityObserver = null;
-        // Ids of tiles that have scrolled into view since the last batch request was sent.
-        let _galleryPendingVisibleIds = new Set();
-        // True while a requestAnimationFrame callback is queued to flush _galleryPendingVisibleIds.
-        let _galleryVisibleFetchScheduled = false;
-        // Sends one request for every tile that became visible since the last animation frame,
-        // instead of one request per tile — a fast scroll or the initial layout can reveal many
-        // rows at once, and /api/gallery/thumbnails already accepts a batch of ids.
-        function _scheduleGalleryVisibleFetch() {
-            if (_galleryVisibleFetchScheduled) return;
-            _galleryVisibleFetchScheduled = true;
-            requestAnimationFrame(function() {
-                _galleryVisibleFetchScheduled = false;
-                if (_galleryPendingVisibleIds.size === 0) return;
-                const ids = Array.from(_galleryPendingVisibleIds);
-                _galleryPendingVisibleIds.clear();
-                fetch('/api/gallery/thumbnails?ids='+ids.join(','), { priority: 'low' })
-                    .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
-                    .then(data => _applyGalleryThumbnailBatch(data.images))
-                    .catch(err => {
-                        console.error('Gallery visible-thumbnail fetch error:', err);
-                        _clearGalleryTileLoadingState(ids);
-                    });
-            });
-        }
-        // Lazy-loads gallery tiles as they scroll into view instead of fetching a whole page's
-        // worth of thumbnails (up to 96 images) up front. rootMargin preloads a bit before a tile
-        // actually enters the viewport so images are already there by the time the user reaches
-        // them. Falls back to loadGalleryThumbnails() (eager, whole-page) when the browser has no
-        // IntersectionObserver support.
-        function _observeGalleryTilesForVisibility() {
-            if (typeof IntersectionObserver === 'undefined') {
-                loadGalleryThumbnails(_currentPageGalleryIds);
-                return;
-            }
-            if (_galleryVisibilityObserver) _galleryVisibilityObserver.disconnect();
-            _galleryPendingVisibleIds.clear();
-            const observer = new IntersectionObserver(function(entries) {
-                entries.forEach(function(entry) {
-                    if (!entry.isIntersecting) return;
-                    observer.unobserve(entry.target);
-                    const galleryId = parseInt(entry.target.getAttribute('data-gallery-id') || '0', 10);
-                    if (!galleryId) return;
-                    const cached = _galleryThumbnailCache.get(galleryId);
-                    if (cached) {
-                        const imgEl = entry.target.querySelector('img[data-gallery-id="'+galleryId+'"]');
-                        if (imgEl) { imgEl.src = cached; imgEl.style.display = ''; }
-                        entry.target.classList.remove('loading');
-                        return;
-                    }
-                    _galleryPendingVisibleIds.add(galleryId);
-                    _scheduleGalleryVisibleFetch();
-                });
-            }, { rootMargin: '600px 0px', threshold: 0.01 });
-            _galleryVisibilityObserver = observer;
-            document.querySelectorAll(
-                '#gallery-grid .image-grid-item.loading, #gallery-grid .gallery-list-item.loading',
-            ).forEach(function(tile) { observer.observe(tile); });
-        }
-        // AbortController for the background next-page prefetch; aborted if a new prefetch
-        // (or a real page navigation) supersedes it before it completes.
+        // AbortController for the background next-page metadata prefetch; aborted if a new
+        // prefetch (or a real page navigation) supersedes it before it completes.
         let _galleryPrefetchAbort = null;
-        // Warms _galleryThumbnailCache for an adjacent page so that navigating there can
-        // render straight from cache instead of waiting on a network round trip. This only
-        // ever primes the thumbnail cache -- the real navigation still performs its own
-        // metadata fetch, so if new images arrive in the meantime and shift page boundaries,
-        // the prefetch just becomes a partial cache hit rather than showing stale data.
+        // Warms the browser's native HTTP cache for an adjacent page's thumbnails so navigating
+        // there renders from cache instead of waiting on a network round trip. Only fetches
+        // metadata itself (cheap); actually warming each thumbnail is just `new Image().src = ...`
+        // -- the browser does the fetching, decoding, and caching, and simply discards the result
+        // if the image is never attached to the DOM. If new images arrive in the meantime and
+        // shift page boundaries, the prefetch just becomes a partial cache hit rather than
+        // showing stale data (the real navigation always re-fetches its own metadata).
         function prefetchAdjacentGalleryPage(page) {
             if (page < 1 || page > galleryTotalPages || page === galleryCurrentPage) return;
             if (_galleryPrefetchAbort) { try { _galleryPrefetchAbort.abort(); } catch(_){} }
@@ -3661,16 +3511,11 @@ class WorkerWebUI:
             _galleryPrefetchAbort = ctrl;
             const modelParam = galleryModelFilter ? '&model='+encodeURIComponent(galleryModelFilter) : '';
             const safetyParam = gallerySafetyFilter ? '&safety='+encodeURIComponent(gallerySafetyFilter) : '';
-            fetch('/api/gallery?page='+page+'&page_size='+galleryPageSize+modelParam+safetyParam,
+            fetch('/api/gallery?page='+page+'&page_size='+galleryPageSize+'&metadata_only=true'+modelParam+safetyParam,
                 { signal: ctrl.signal, priority: 'low' })
                 .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
                 .then(data => {
-                    (data.images || []).forEach(entry => {
-                        const galleryId = entry.gallery_id;
-                        if (_galleryThumbnailCache.has(galleryId)) return;
-                        const thumbSrc = entry.thumbnail ? 'data:image/jpeg;base64,'+entry.thumbnail : (entry.base64 ? 'data:image/png;base64,'+entry.base64 : null);
-                        if (entry.thumbnail && thumbSrc) _cacheThumbnail(galleryId, thumbSrc);
-                    });
+                    (data.images || []).forEach(entry => { new Image().src = '/api/gallery/thumb/'+entry.gallery_id; });
                 })
                 .catch(err => { if (err.name !== 'AbortError') console.debug('Gallery prefetch skipped:', err); });
         }
@@ -3685,9 +3530,9 @@ class WorkerWebUI:
             const modelParam = galleryModelFilter ? '&model='+encodeURIComponent(galleryModelFilter) : '';
             const safetyParam = gallerySafetyFilter ? '&safety='+encodeURIComponent(gallerySafetyFilter) : '';
             // Only fetch lightweight metadata up front — renderGalleryPageSkeleton() renders the
-            // skeleton immediately and then lazy-loads each tile's thumbnail as it scrolls into
-            // view (see _observeGalleryTilesForVisibility), instead of fetching a whole page's
-            // worth of image data (up to 96 images) before anything is shown.
+            // skeleton immediately with real <img src="/api/gallery/thumb/ID"> tags, so the
+            // browser's own native lazy-loading and HTTP cache handle each thumbnail instead of
+            // fetching a whole page's worth of image data (up to 96 images) before anything shows.
             fetch('/api/gallery?page='+page+'&page_size='+galleryPageSize+'&metadata_only=true'+modelParam+safetyParam)
                 .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
                 .then(data => {
@@ -3767,6 +3612,9 @@ class WorkerWebUI:
                             const ts = formatTimestamp(img.timestamp);
                             const model = img.model ? escapeHtml(img.model) : '';
                             const isNsfw = img.is_nsfw === true, isCsam = img.is_csam === true;
+                            // Real <img src="/api/gallery/thumb/ID"> -- see renderGalleryPageSkeleton
+                            // for why this is enough for native lazy-loading + HTTP caching.
+                            const thumbSrc = '/api/gallery/thumb/'+galleryId;
                             const div = document.createElement('div');
                             if (isList) {
                                 const tsLong = formatTimestampFull(img.timestamp);
@@ -3781,7 +3629,7 @@ class WorkerWebUI:
                                 div.setAttribute('data-gallery-id', galleryId);
                                 if (isNsfw) div.setAttribute('data-nsfw', '1');
                                 if (isCsam) div.setAttribute('data-csam', '1');
-                                div.innerHTML = '<div class="gallery-list-thumb"><img alt="Generated image" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" style="display:none;" /></div>' +
+                                div.innerHTML = '<div class="gallery-list-thumb"><img alt="Generated image" src="'+thumbSrc+'" loading="lazy" decoding="async" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" /></div>' +
                                     '<div class="gallery-list-meta">'+row1+(tsLong ? '<div class="gallery-list-ts">'+tsLong+'</div>' : '')+(posPromptHtml ? '<div class="gallery-list-prompt pos" title="'+posTitle+'">'+posPromptHtml+'</div>' : '')+(negPromptHtml ? '<div class="gallery-list-prompt neg" title="'+negTitle+'">'+negPromptHtml+'</div>' : '')+flagBadges+'</div>';
                             } else {
                                 const flagBadges = (isNsfw || isCsam) ? '<div class="image-flag-badges">'+(isCsam ? '<span class="image-flag-badge csam">CSAM</span>' : '')+(isNsfw ? '<span class="image-flag-badge nsfw">NSFW</span>' : '')+'</div>' : '';
@@ -3790,33 +3638,15 @@ class WorkerWebUI:
                                 div.setAttribute('data-gallery-id', galleryId);
                                 if (isNsfw) div.setAttribute('data-nsfw', '1');
                                 if (isCsam) div.setAttribute('data-csam', '1');
-                                div.innerHTML = '<img alt="Generated image" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" style="display:none;" />'+flagBadges+(cap ? '<div class="image-timestamp">'+cap+'</div>' : '');
+                                div.innerHTML = '<img alt="Generated image" src="'+thumbSrc+'" loading="lazy" decoding="async" data-gallery-id="'+galleryId+'" data-idx="'+idx+'" />'+flagBadges+(cap ? '<div class="image-timestamp">'+cap+'</div>' : '');
                             }
-                            div.querySelector('img').onclick = function() { openGalleryImageOverlay(parseInt(this.getAttribute('data-gallery-id')||'0',10), _currentPageGalleryIds, parseInt(this.getAttribute('data-idx')||'0',10)); };
+                            const imgEl = div.querySelector('img');
+                            imgEl.onclick = function() { openGalleryImageOverlay(parseInt(this.getAttribute('data-gallery-id')||'0',10), _currentPageGalleryIds, parseInt(this.getAttribute('data-idx')||'0',10)); };
+                            const stopLoading = function() { div.classList.remove('loading'); };
+                            imgEl.onload = stopLoading; imgEl.onerror = stopLoading;
                             frag.appendChild(div);
                         });
                         grid.insertBefore(frag, grid.firstChild);
-                        if (_galleryBatchAbort) _galleryBatchAbort.abort();
-                        const incrAbort = new AbortController();
-                        _galleryBatchAbort = incrAbort;
-                        newImages.forEach(({ img }) => {
-                            const galleryId = img.gallery_id;
-                            fetch('/api/gallery/image?id='+galleryId+'&thumbnail_only=true', { signal: incrAbort.signal })
-                                .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
-                                .then(d => {
-                                    const c = grid.querySelector('[data-gallery-id="'+galleryId+'"]');
-                                    const ie = c ? c.querySelector('img') : null;
-                                    const src = d.thumbnail ? 'data:image/jpeg;base64,'+d.thumbnail : (d.base64 ? 'data:image/png;base64,'+d.base64 : null);
-                                    if (d.thumbnail && src) { _cacheThumbnail(galleryId, src); }
-                                    if (src && ie) { ie.src = src; ie.style.display = ''; }
-                                    if (c) c.classList.remove('loading');
-                                })
-                                .catch(err => {
-                                    if (err.name === 'AbortError') return;
-                                    const c = grid.querySelector('[data-gallery-id="'+galleryId+'"]');
-                                    if (c) c.classList.remove('loading');
-                                });
-                        });
                     }
                 })
                 .catch(err => { console.error('Gallery refresh error:', err); galleryFetchInProgress = false; });
@@ -6117,9 +5947,8 @@ class WorkerWebUI:
                         { name: 'model', type: 'string', required: false, desc: 'Filter to a single model name (case-insensitive).' },
                         { name: 'safety', type: 'string', required: false, desc: 'One of <code>sfw</code>, <code>nsfw</code>, <code>csam</code>.' },
                     ] },
-                    { method: 'GET', path: '/api/gallery/thumbnails', desc: 'Thumbnails (or full-resolution fallback) for a specific set of gallery ids, used by the gallery grid to lazy-load only visible tiles.', params: [
-                        { name: 'ids', type: 'string', required: true, desc: 'Comma-separated list of gallery_id integers (max 200 per request).' },
-                    ] },
+                    { method: 'GET', path: '/api/gallery/thumb/{gallery_id}', desc: 'A single gallery thumbnail as raw image bytes (JPEG, or full-resolution PNG fallback), cached forever by the browser (images are immutable once generated). Used directly as an &lt;img src&gt; by the gallery grid.' },
+                    { method: 'GET', path: '/api/gallery/full/{gallery_id}', desc: 'A single gallery image at full resolution as raw PNG bytes, cached forever by the browser. Used directly as an &lt;img src&gt; by the overlay viewer.' },
                     { method: 'GET', path: '/api/gallery/models', desc: 'Distinct model names in the gallery with per-model image counts.' },
                     { method: 'GET', path: '/api/gallery/safety', desc: 'Per-safety-category (sfw/nsfw/csam) image counts.' },
                     { method: 'GET', path: '/api/gallery/image', desc: 'A single gallery image by id.', params: [
@@ -7397,57 +7226,90 @@ class WorkerWebUI:
             },
         )
 
-    _MAX_GALLERY_THUMBNAIL_IDS_PER_REQUEST = 200
-    """Cap on ids accepted by /api/gallery/thumbnails per request. The gallery grid only ever
-    requests ids for tiles that just became visible (batched per animation frame), so a real
-    request is at most a couple of screens' worth of tiles; this is a defensive upper bound
-    against a malformed/abusive query rather than a limit expected to be hit in practice."""
+    # Gallery images are immutable once generated: a given gallery_id's bytes never change (new
+    # images always get a new, never-reused id — see the "gallery_id must remain stable" test in
+    # tests/test_webui.py), so the browser can cache them forever without ever revalidating. This
+    # is what makes revisiting a page, reopening the overlay, or even a full reload of the app
+    # near-instant for anything already seen, instead of re-fetching from the server every time.
+    _GALLERY_IMAGE_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
 
-    async def _handle_gallery_thumbnails(self, request: web.Request) -> web.Response:
-        """Return thumbnails (or full-resolution fallback) for a specific set of gallery ids.
+    async def _resolve_gallery_thumbnail_bytes(self, gallery_id: int) -> tuple[bytes, str] | None:
+        """Return (raw_bytes, content_type) for a gallery thumbnail, or None if not found.
 
-        This backs the gallery grid's viewport-based lazy loading: as tiles scroll into view,
-        the client requests only those ids instead of the whole page's worth of image data up
-        front, keeping the initial page load small regardless of page_size.
-
-        Query parameters:
-            ids: comma-separated list of gallery_id integers (capped at
-                _MAX_GALLERY_THUMBNAIL_IDS_PER_REQUEST per request; extras are ignored).
+        Falls back to the full-resolution image (as PNG) when no thumbnail is available (e.g.
+        Pillow not installed), and to the gallery DB when the in-memory copy was evicted to
+        bound RAM.
         """
-        ids_param = request.rel_url.query.get("ids", "")
-        try:
-            requested_ids = [int(x) for x in ids_param.split(",") if x.strip()]
-        except ValueError:
-            return web.json_response({"error": "Invalid ids parameter"}, status=400)
-        requested_ids = requested_ids[: self._MAX_GALLERY_THUMBNAIL_IDS_PER_REQUEST]
-
-        images: list[dict[str, Any]] = []
-        missing_ids: list[int] = []
-        for gallery_id in requested_ids:
-            entry = self._gallery_dict.get(gallery_id)
-            if entry is None:
-                continue
-            if entry.get("thumbnail"):
-                images.append({"gallery_id": gallery_id, "thumbnail": entry["thumbnail"]})
-            elif entry.get("base64"):
-                images.append({"gallery_id": gallery_id, "base64": entry["base64"]})
-            else:
-                missing_ids.append(gallery_id)
-
-        if missing_ids:
-            # Thumbnail evicted from memory to bound RAM — fetch it back from the gallery DB
-            # in a single batched query (same helper /api/gallery uses for the same purpose).
+        entry = self._gallery_dict.get(gallery_id)
+        thumbnail_b64 = entry.get("thumbnail") if entry else None
+        if not thumbnail_b64:
             db_thumbs = await asyncio.get_running_loop().run_in_executor(
-                None,
-                self._fetch_gallery_thumbnails_from_db,
-                missing_ids,
+                None, self._fetch_gallery_thumbnails_from_db, [gallery_id],
             )
-            for gallery_id in missing_ids:
-                db_thumb = db_thumbs.get(gallery_id)
-                if db_thumb:
-                    images.append({"gallery_id": gallery_id, "thumbnail": db_thumb})
+            thumbnail_b64 = db_thumbs.get(gallery_id)
+        if thumbnail_b64:
+            return base64.b64decode(thumbnail_b64), "image/jpeg"
 
-        return web.json_response({"images": images})
+        fullres_b64 = await self._resolve_gallery_fullres_b64(gallery_id, entry)
+        if fullres_b64:
+            return base64.b64decode(fullres_b64), "image/png"
+        return None
+
+    async def _resolve_gallery_fullres_b64(
+        self,
+        gallery_id: int,
+        entry: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Return the full-resolution base64 for a gallery id, falling back to the DB."""
+        if entry is None:
+            entry = self._gallery_dict.get(gallery_id)
+        if entry and entry.get("base64"):
+            return entry["base64"]
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._fetch_gallery_base64_from_db, gallery_id,
+        )
+
+    def _parse_gallery_id_from_match_info(self, request: web.Request) -> int:
+        try:
+            return int(request.match_info["gallery_id"])
+        except ValueError:
+            raise web.HTTPBadRequest(reason="Invalid gallery_id") from None
+
+    async def _handle_gallery_thumb_binary(self, request: web.Request) -> web.Response:
+        """Serve a single gallery thumbnail as raw image bytes (JPEG, or PNG fallback).
+
+        Used directly as an ``<img src="...">`` by the gallery grid so the browser's native
+        image loading, native lazy-loading (``loading="lazy"``), and HTTP cache all apply with
+        no custom client-side JS — revisiting a page (or a full reload) is served from the
+        browser's own cache instead of re-fetching from the server.
+        """
+        gallery_id = self._parse_gallery_id_from_match_info(request)
+        resolved = await self._resolve_gallery_thumbnail_bytes(gallery_id)
+        if resolved is None:
+            raise web.HTTPNotFound(reason="Gallery image not found")
+        image_bytes, content_type = resolved
+        return web.Response(
+            body=image_bytes,
+            content_type=content_type,
+            headers=self._GALLERY_IMAGE_CACHE_HEADERS,
+        )
+
+    async def _handle_gallery_full_binary(self, request: web.Request) -> web.Response:
+        """Serve a single gallery image at full resolution as raw PNG bytes.
+
+        Used directly as an ``<img src="...">`` by the overlay viewer for the same reason as
+        _handle_gallery_thumb_binary: native loading and HTTP caching instead of a JSON+base64
+        fetch, so reopening an already-viewed image is instant.
+        """
+        gallery_id = self._parse_gallery_id_from_match_info(request)
+        fullres_b64 = await self._resolve_gallery_fullres_b64(gallery_id)
+        if fullres_b64 is None:
+            raise web.HTTPNotFound(reason="Gallery image not found")
+        return web.Response(
+            body=base64.b64decode(fullres_b64),
+            content_type="image/png",
+            headers=self._GALLERY_IMAGE_CACHE_HEADERS,
+        )
 
     async def _handle_gallery_models(self, request: web.Request) -> web.Response:
         """Return sorted model names with image counts and the overall gallery total.
