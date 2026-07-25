@@ -708,6 +708,88 @@ async def test_webui_gallery_thumb_binary_db_fallback(tmp_path: pathlib.Path) ->
 
 
 @pytest.mark.asyncio
+async def test_webui_gallery_cache_epoch_unique_per_instance() -> None:
+    """Test that GALLERY_CACHE_EPOCH is injected into the page and differs per process/instance.
+
+    The gallery grid appends this token to every /api/gallery/thumb|full/{id} URL so that a
+    worker restart (which restarts gallery_id from 0 when no database is configured) always
+    produces URLs the browser has never cached, instead of risking a stale hit against whatever
+    a reused gallery_id pointed to before the restart.
+    """
+    webui1 = WorkerWebUI(port=0)
+    webui2 = WorkerWebUI(port=0)
+
+    try:
+        await webui1.start()
+        await webui2.start()
+        await asyncio.sleep(0.5)
+        port1 = webui1.site._server.sockets[0].getsockname()[1] if webui1.site else 0
+        port2 = webui2.site._server.sockets[0].getsockname()[1] if webui2.site else 0
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://localhost:{port1}/") as response:
+                html1 = await response.text()
+            async with session.get(f"http://localhost:{port2}/") as response:
+                html2 = await response.text()
+
+        assert "{{GALLERY_CACHE_EPOCH}}" not in html1
+        assert "GALLERY_CACHE_EPOCH = '" in html1
+
+        def _extract_epoch(html: str) -> str:
+            marker = "GALLERY_CACHE_EPOCH = '"
+            start = html.index(marker) + len(marker)
+            return html[start : html.index("'", start)]
+
+        epoch1, epoch2 = _extract_epoch(html1), _extract_epoch(html2)
+        assert epoch1 and epoch2
+        assert epoch1 != epoch2, "each WorkerWebUI instance (i.e. each process start) must get its own epoch"
+    finally:
+        await webui1.stop()
+        await webui2.stop()
+
+
+@pytest.mark.asyncio
+async def test_webui_reset_database_does_not_reuse_gallery_ids() -> None:
+    """Test that resetting the database does not restart gallery_id from 0.
+
+    /api/gallery/thumb|full/{id} are cached by the browser as "immutable" for a year, which
+    is only safe if a gallery_id is never reused for different image content. If a reset
+    restarted the counter, the very next image added afterward would collide with whatever the
+    browser still has cached for that id.
+    """
+    webui = WorkerWebUI(port=0)
+
+    try:
+        await webui.start()
+        await asyncio.sleep(0.5)
+        actual_port = webui.site._server.sockets[0].getsockname()[1] if webui.site else 0
+
+        test_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        webui.add_gallery_image({"base64": test_b64, "timestamp": 1.0, "model": "m"})
+        webui.add_gallery_image({"base64": test_b64, "timestamp": 2.0, "model": "m"})
+        next_id_before_reset = webui._next_gallery_id
+        assert next_id_before_reset == 2
+
+        async with aiohttp.ClientSession() as session, session.post(
+            f"http://localhost:{actual_port}/api/reset-database",
+        ) as response:
+            assert response.status == 200
+
+        assert webui._gallery_dict == {}
+        assert webui._next_gallery_id == next_id_before_reset, (
+            "gallery_id counter must keep incrementing across a reset, not restart from 0"
+        )
+
+        webui.add_gallery_image({"base64": test_b64, "timestamp": 3.0, "model": "m"})
+        assert 0 not in webui._gallery_dict, "a previously-used gallery_id must never be reassigned"
+        assert next_id_before_reset in webui._gallery_dict
+    finally:
+        await webui.stop()
+
+
+@pytest.mark.asyncio
 async def test_webui_index_initial_gpu_and_vram_markup() -> None:
     """Test that the initial GPU/VRAM topbar pills render neutral values with aria state."""
     webui = WorkerWebUI(port=0)

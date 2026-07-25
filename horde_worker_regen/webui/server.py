@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import secrets
 import sqlite3
 import time
 from collections import deque
@@ -285,6 +286,20 @@ class WorkerWebUI:
         self.app = web.Application()
         self.runner: web.AppRunner | None = None
         self.site: web.TCPSite | None = None
+        # Secondary listener on the IPv6 loopback/any address -- see start() for why this
+        # matters even though the app is only ever reached over IPv4 in practice.
+        self._ipv6_site: web.TCPSite | None = None
+
+        # Unique per process start, appended as a query param to every
+        # /api/gallery/thumb|full/{id} URL the page renders (see the "e" param on those routes).
+        # Those responses are cached by the browser as "immutable" for a year, which is only
+        # safe if a given URL's content truly never changes. gallery_id alone doesn't guarantee
+        # that: without a persisted database _next_gallery_id restarts from 0 on every process
+        # start (auto-restart, crash recovery, manual restart), so id 0 after a restart is a
+        # different image than id 0 before it. Folding a fresh per-process token into the URL
+        # means a restart always produces URLs the browser has never seen, so it always
+        # re-fetches instead of risking a stale cache hit against the previous process's image.
+        self._gallery_cache_epoch = secrets.token_hex(8)
 
         # SQLite persistence --------------------------------------------------
         # Determine database directory and individual database paths.
@@ -2583,6 +2598,12 @@ class WorkerWebUI:
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
         const VALID_PAGES = Object.freeze(['overview', 'gallery', 'user', 'horde', 'stats', 'logs', 'settings', 'api', 'about']);
+        // Appended as ?e=... to every /api/gallery/thumb|full/{id} URL. Those responses are
+        // cached by the browser as "immutable" for a year; this token changes every time the
+        // worker process restarts, so a restart always produces URLs the browser has never
+        // seen (see WorkerWebUI._gallery_cache_epoch) instead of risking a stale cache hit
+        // against whatever a reused gallery_id pointed to in the previous process.
+        const GALLERY_CACHE_EPOCH = '{{GALLERY_CACHE_EPOCH}}';
         let galleryCurrentPage = 1, galleryTotalPages = 1, galleryTotalImages = 0, galleryFetchInProgress = false;
         const GALLERY_DEFAULT_PAGE_SIZE = 96;
         let galleryPageSize = GALLERY_DEFAULT_PAGE_SIZE;
@@ -2888,7 +2909,7 @@ class WorkerWebUI:
             content.classList.add('is-loading');
             el.fetchPriority = 'high';
             el.onload = el.onerror = function() { content.classList.remove('is-loading'); };
-            el.src = '/api/gallery/full/' + galleryId;
+            el.src = '/api/gallery/full/' + galleryId + '?e=' + GALLERY_CACHE_EPOCH;
         }
         function openGalleryImageOverlay(galleryId, galleryIds, localIdx) {
             if (Array.isArray(galleryIds) && galleryIds.length > 0) {
@@ -3439,7 +3460,7 @@ class WorkerWebUI:
                 // instantly from cache instead of re-fetching them (see
                 // _GALLERY_IMAGE_CACHE_HEADERS on the server -- gallery images are immutable
                 // once generated, so the cache never needs to revalidate).
-                const thumbSrc = '/api/gallery/thumb/'+galleryId;
+                const thumbSrc = '/api/gallery/thumb/'+galleryId+'?e='+GALLERY_CACHE_EPOCH;
                 if (isList) {
                     const tsLong = formatTimestampFull(img.timestamp);
                     const steps = img.inference_steps ? img.inference_steps + ' steps' : '';
@@ -3515,7 +3536,7 @@ class WorkerWebUI:
                 { signal: ctrl.signal, priority: 'low' })
                 .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
                 .then(data => {
-                    (data.images || []).forEach(entry => { new Image().src = '/api/gallery/thumb/'+entry.gallery_id; });
+                    (data.images || []).forEach(entry => { new Image().src = '/api/gallery/thumb/'+entry.gallery_id+'?e='+GALLERY_CACHE_EPOCH; });
                 })
                 .catch(err => { if (err.name !== 'AbortError') console.debug('Gallery prefetch skipped:', err); });
         }
@@ -3614,7 +3635,7 @@ class WorkerWebUI:
                             const isNsfw = img.is_nsfw === true, isCsam = img.is_csam === true;
                             // Real <img src="/api/gallery/thumb/ID"> -- see renderGalleryPageSkeleton
                             // for why this is enough for native lazy-loading + HTTP caching.
-                            const thumbSrc = '/api/gallery/thumb/'+galleryId;
+                            const thumbSrc = '/api/gallery/thumb/'+galleryId+'?e='+GALLERY_CACHE_EPOCH;
                             const div = document.createElement('div');
                             if (isList) {
                                 const tsLong = formatTimestampFull(img.timestamp);
@@ -6663,6 +6684,7 @@ class WorkerWebUI:
             f"var _hordeSnapshots = {snaps_json};",
         )
         html = html.replace("{{WORKER_VERSION}}", horde_worker_regen.__version__)
+        html = html.replace("{{GALLERY_CACHE_EPOCH}}", self._gallery_cache_epoch)
         return web.Response(text=html, content_type="text/html")
 
     async def _handle_delete_worker(self, request: web.Request) -> web.Response:
@@ -7858,7 +7880,13 @@ class WorkerWebUI:
         self._live_errors_history = []
         self._persisted_errors = []
         self._gallery_dict.clear()
-        self._next_gallery_id = 0
+        # Deliberately NOT resetting _next_gallery_id to 0: /api/gallery/thumb/{id} and
+        # /api/gallery/full/{id} are cached by the browser as "immutable" for a year on the
+        # assumption that a gallery_id's bytes never change. If ids restarted from 0 here, the
+        # very next image generated after a reset would reuse an id the browser may still have
+        # a stale thumbnail cached for, and it would never re-fetch to notice the mismatch.
+        # Continuing to increment keeps every gallery_id permanently unique, which is what makes
+        # that caching safe in the first place.
         self.status_data["images_count"] = 0
         self._stats_snapshots.clear()
         self._last_stats_snapshot_time = 0.0
@@ -8431,6 +8459,24 @@ class WorkerWebUI:
                 if _sockets:
                     self.port = _sockets[0].getsockname()[1]
             logger.info(f"Web UI started at http://0.0.0.0:{self.port}")
+
+            # Also listen on the IPv6 loopback/any address. "0.0.0.0" alone leaves nothing
+            # listening on "::" / "::1", and browsers (and curl) resolve "localhost" to try
+            # IPv6 first per RFC 6724 address-selection rules. With nothing to answer there,
+            # every fresh connection burns Happy-Eyeballs' ~200-250ms IPv6-attempt delay before
+            # falling back to IPv4 -- and the gallery grid opens several fresh connections at
+            # once for its initial batch of thumbnails, making page loads feel sluggish for a
+            # cost that has nothing to do with image size or server processing time. Binding
+            # "::" as well means the IPv6 attempt succeeds immediately instead of timing out.
+            # Best-effort only: some environments have IPv6 disabled entirely, and the app is
+            # fully functional over IPv4 alone, so any failure here is silently non-fatal.
+            try:
+                self._ipv6_site = web.TCPSite(self.runner, "::", self.port)
+                await self._ipv6_site.start()
+            except Exception as e:
+                logger.debug(f"Could not start IPv6 web UI listener (IPv4 is unaffected): {e}")
+                self._ipv6_site = None
+
             self._horde_bg_task = asyncio.create_task(self._poll_horde_network())
             self._horde_bg_task.add_done_callback(self._log_bg_task_exception)
         except Exception as e:
@@ -8458,6 +8504,9 @@ class WorkerWebUI:
         try:
             if self.site:
                 await self.site.stop()
+            if self._ipv6_site:
+                await self._ipv6_site.stop()
+                self._ipv6_site = None
             if self.runner:
                 await self.runner.cleanup()
             logger.info("Web UI server stopped")
