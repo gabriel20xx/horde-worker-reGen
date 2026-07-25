@@ -1180,6 +1180,7 @@ class WorkerWebUI:
         self.app.router.add_post("/api/errors/clear", self._handle_errors_clear)
         self.app.router.add_get("/api/last_image", self._handle_last_image)
         self.app.router.add_get("/api/gallery", self._handle_gallery)
+        self.app.router.add_get("/api/gallery/thumbnails", self._handle_gallery_thumbnails)
         self.app.router.add_get("/api/gallery/models", self._handle_gallery_models)
         self.app.router.add_get("/api/gallery/safety", self._handle_gallery_safety)
         self.app.router.add_get("/api/gallery/image", self._handle_gallery_image)
@@ -2927,10 +2928,13 @@ class WorkerWebUI:
             document.getElementById('image-overlay').classList.remove('active');
             const wasGalleryOverlay = _galleryOverlayIds !== null;
             overlayImages = []; overlayIndex = -1; _galleryOverlayIds = null;
-            // Resume any gallery thumbnail loading that was paused to prioritize the overlay
-            // image (loadGalleryThumbnails skips ids already cached, so this is a no-op if
-            // the batch had already finished before the overlay was closed).
-            if (wasGalleryOverlay && _currentPageGalleryIds.length > 0) loadGalleryThumbnails(_currentPageGalleryIds);
+            // Visible-tile lazy loading (_observeGalleryTilesForVisibility) isn't paused by the
+            // overlay — only the legacy whole-page batch fetch was, so resuming is only needed
+            // on the IntersectionObserver-less fallback path (loadGalleryThumbnails skips ids
+            // already cached, so this is a no-op if the batch had already finished).
+            if (wasGalleryOverlay && _currentPageGalleryIds.length > 0 && typeof IntersectionObserver === 'undefined') {
+                loadGalleryThumbnails(_currentPageGalleryIds);
+            }
         }
         document.getElementById('image-overlay').addEventListener('click', function(e) { if (e.target === this) closeImageOverlay(); });
         document.addEventListener('keydown', function(e) {
@@ -3503,6 +3507,9 @@ class WorkerWebUI:
             pi.textContent = 'Page '+page+' of '+tp;
             pb.disabled = page <= 1; nb.disabled = page >= tp;
             pag.style.display = 'flex';
+            // Lazy-load: only fetch image data for tiles that actually scroll into view,
+            // instead of the whole page (up to 96 images) up front.
+            _observeGalleryTilesForVisibility();
         }
         function setGalleryView(mode) {
             galleryViewMode = mode;
@@ -3511,8 +3518,8 @@ class WorkerWebUI:
             var btn = document.getElementById('gallery-view-' + mode);
             if (btn) btn.classList.add('active');
             if (_galleryCurrentPageImages) {
+                // renderGalleryPageSkeleton() re-triggers visibility-based lazy loading itself.
                 renderGalleryPageSkeleton(_galleryCurrentPageImages, galleryTotalImages, galleryCurrentPage, galleryTotalPages);
-                loadGalleryThumbnails(_currentPageGalleryIds);
             }
         }
         // Stops the loading shimmer on the given tiles without populating an image — used both
@@ -3543,6 +3550,9 @@ class WorkerWebUI:
                 if (container) container.classList.remove('loading');
             });
         }
+        // Fallback path for browsers without IntersectionObserver support (see
+        // _observeGalleryTilesForVisibility): eagerly loads thumbnails for the whole page in
+        // one request instead of lazily loading only the tiles that are actually visible.
         function loadGalleryThumbnails(galleryIds) {
             // Increment the batch ID so any stale responses from a previous page are discarded.
             const batchId = ++_galleryThumbnailBatchId;
@@ -3573,6 +3583,68 @@ class WorkerWebUI:
                     // On error, stop the shimmer for every tile still waiting so nothing spins forever.
                     _clearGalleryTileLoadingState(idsNeeded);
                 });
+        }
+        // IntersectionObserver watching not-yet-loaded gallery tiles; (re)created for each page
+        // render by _observeGalleryTilesForVisibility(). Kept at module scope so it can be
+        // disconnected before a fresh set of tiles is observed.
+        let _galleryVisibilityObserver = null;
+        // Ids of tiles that have scrolled into view since the last batch request was sent.
+        let _galleryPendingVisibleIds = new Set();
+        // True while a requestAnimationFrame callback is queued to flush _galleryPendingVisibleIds.
+        let _galleryVisibleFetchScheduled = false;
+        // Sends one request for every tile that became visible since the last animation frame,
+        // instead of one request per tile — a fast scroll or the initial layout can reveal many
+        // rows at once, and /api/gallery/thumbnails already accepts a batch of ids.
+        function _scheduleGalleryVisibleFetch() {
+            if (_galleryVisibleFetchScheduled) return;
+            _galleryVisibleFetchScheduled = true;
+            requestAnimationFrame(function() {
+                _galleryVisibleFetchScheduled = false;
+                if (_galleryPendingVisibleIds.size === 0) return;
+                const ids = Array.from(_galleryPendingVisibleIds);
+                _galleryPendingVisibleIds.clear();
+                fetch('/api/gallery/thumbnails?ids='+ids.join(','), { priority: 'low' })
+                    .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+                    .then(data => _applyGalleryThumbnailBatch(data.images))
+                    .catch(err => {
+                        console.error('Gallery visible-thumbnail fetch error:', err);
+                        _clearGalleryTileLoadingState(ids);
+                    });
+            });
+        }
+        // Lazy-loads gallery tiles as they scroll into view instead of fetching a whole page's
+        // worth of thumbnails (up to 96 images) up front. rootMargin preloads a bit before a tile
+        // actually enters the viewport so images are already there by the time the user reaches
+        // them. Falls back to loadGalleryThumbnails() (eager, whole-page) when the browser has no
+        // IntersectionObserver support.
+        function _observeGalleryTilesForVisibility() {
+            if (typeof IntersectionObserver === 'undefined') {
+                loadGalleryThumbnails(_currentPageGalleryIds);
+                return;
+            }
+            if (_galleryVisibilityObserver) _galleryVisibilityObserver.disconnect();
+            _galleryPendingVisibleIds.clear();
+            const observer = new IntersectionObserver(function(entries) {
+                entries.forEach(function(entry) {
+                    if (!entry.isIntersecting) return;
+                    observer.unobserve(entry.target);
+                    const galleryId = parseInt(entry.target.getAttribute('data-gallery-id') || '0', 10);
+                    if (!galleryId) return;
+                    const cached = _galleryThumbnailCache.get(galleryId);
+                    if (cached) {
+                        const imgEl = entry.target.querySelector('img[data-gallery-id="'+galleryId+'"]');
+                        if (imgEl) { imgEl.src = cached; imgEl.style.display = ''; }
+                        entry.target.classList.remove('loading');
+                        return;
+                    }
+                    _galleryPendingVisibleIds.add(galleryId);
+                    _scheduleGalleryVisibleFetch();
+                });
+            }, { rootMargin: '600px 0px', threshold: 0.01 });
+            _galleryVisibilityObserver = observer;
+            document.querySelectorAll(
+                '#gallery-grid .image-grid-item.loading, #gallery-grid .gallery-list-item.loading',
+            ).forEach(function(tile) { observer.observe(tile); });
         }
         // AbortController for the background next-page prefetch; aborted if a new prefetch
         // (or a real page navigation) supersedes it before it completes.
@@ -3612,44 +3684,16 @@ class WorkerWebUI:
             if (geEl) geEl.style.display = 'none';
             const modelParam = galleryModelFilter ? '&model='+encodeURIComponent(galleryModelFilter) : '';
             const safetyParam = gallerySafetyFilter ? '&safety='+encodeURIComponent(gallerySafetyFilter) : '';
-            // Fire the metadata (skeleton) request and the thumbnail-bearing request for this
-            // page at the same time instead of sequentially. This is the path used whenever the
-            // Gallery tab is opened with an empty grid — i.e. the coldest possible cache, where
-            // page 1's thumbnails have never been fetched — so there is no "already cached" fast
-            // path to lose by not waiting on phase 1 before starting phase 2. Previously phase 2
-            // only began after phase 1's full round trip completed and the skeleton had already
-            // rendered; starting both together removes that extra round trip from time-to-thumbnail.
-            const thumbBatchId = ++_galleryThumbnailBatchId;
-            if (_galleryBatchAbort) { try { _galleryBatchAbort.abort(); } catch(_){} }
-            const batchAbort = new AbortController();
-            _galleryBatchAbort = batchAbort;
-            const thumbPromise = fetch('/api/gallery?page='+page+'&page_size='+galleryPageSize+modelParam+safetyParam,
-                { signal: batchAbort.signal, priority: 'low' })
-                .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
-                .catch(err => {
-                    if (err.name === 'AbortError') return null;
-                    console.error('Gallery thumbnail batch load error:', err);
-                    return null;
-                });
-
+            // Only fetch lightweight metadata up front — renderGalleryPageSkeleton() renders the
+            // skeleton immediately and then lazy-loads each tile's thumbnail as it scrolls into
+            // view (see _observeGalleryTilesForVisibility), instead of fetching a whole page's
+            // worth of image data (up to 96 images) before anything is shown.
             fetch('/api/gallery?page='+page+'&page_size='+galleryPageSize+'&metadata_only=true'+modelParam+safetyParam)
                 .then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
                 .then(data => {
                     if (glEl) glEl.style.display = 'none';
                     renderGalleryPageSkeleton(data.images, data.total, data.page, data.total_pages);
                     galleryFetchInProgress = false;
-                    const galleryIds = data.images.map(img => img.gallery_id);
-                    // Apply thumbnails as soon as the (already in-flight) batch request settles —
-                    // immediately if it beat the metadata request back, otherwise as soon as it
-                    // arrives. On failure, clear the shimmer instead of leaving tiles spinning.
-                    thumbPromise.then(thumbData => {
-                        if (thumbBatchId !== _galleryThumbnailBatchId) return;
-                        if (thumbData) {
-                            _applyGalleryThumbnailBatch(thumbData.images);
-                        } else {
-                            _clearGalleryTileLoadingState(galleryIds);
-                        }
-                    });
                     // Warm the next page's thumbnail cache in the background (after this
                     // page's own request is underway) so clicking "Next" typically renders
                     // instantly instead of waiting on a fresh round trip.
@@ -6073,6 +6117,9 @@ class WorkerWebUI:
                         { name: 'model', type: 'string', required: false, desc: 'Filter to a single model name (case-insensitive).' },
                         { name: 'safety', type: 'string', required: false, desc: 'One of <code>sfw</code>, <code>nsfw</code>, <code>csam</code>.' },
                     ] },
+                    { method: 'GET', path: '/api/gallery/thumbnails', desc: 'Thumbnails (or full-resolution fallback) for a specific set of gallery ids, used by the gallery grid to lazy-load only visible tiles.', params: [
+                        { name: 'ids', type: 'string', required: true, desc: 'Comma-separated list of gallery_id integers (max 200 per request).' },
+                    ] },
                     { method: 'GET', path: '/api/gallery/models', desc: 'Distinct model names in the gallery with per-model image counts.' },
                     { method: 'GET', path: '/api/gallery/safety', desc: 'Per-safety-category (sfw/nsfw/csam) image counts.' },
                     { method: 'GET', path: '/api/gallery/image', desc: 'A single gallery image by id.', params: [
@@ -7349,6 +7396,58 @@ class WorkerWebUI:
                 "images": page_images,
             },
         )
+
+    _MAX_GALLERY_THUMBNAIL_IDS_PER_REQUEST = 200
+    """Cap on ids accepted by /api/gallery/thumbnails per request. The gallery grid only ever
+    requests ids for tiles that just became visible (batched per animation frame), so a real
+    request is at most a couple of screens' worth of tiles; this is a defensive upper bound
+    against a malformed/abusive query rather than a limit expected to be hit in practice."""
+
+    async def _handle_gallery_thumbnails(self, request: web.Request) -> web.Response:
+        """Return thumbnails (or full-resolution fallback) for a specific set of gallery ids.
+
+        This backs the gallery grid's viewport-based lazy loading: as tiles scroll into view,
+        the client requests only those ids instead of the whole page's worth of image data up
+        front, keeping the initial page load small regardless of page_size.
+
+        Query parameters:
+            ids: comma-separated list of gallery_id integers (capped at
+                _MAX_GALLERY_THUMBNAIL_IDS_PER_REQUEST per request; extras are ignored).
+        """
+        ids_param = request.rel_url.query.get("ids", "")
+        try:
+            requested_ids = [int(x) for x in ids_param.split(",") if x.strip()]
+        except ValueError:
+            return web.json_response({"error": "Invalid ids parameter"}, status=400)
+        requested_ids = requested_ids[: self._MAX_GALLERY_THUMBNAIL_IDS_PER_REQUEST]
+
+        images: list[dict[str, Any]] = []
+        missing_ids: list[int] = []
+        for gallery_id in requested_ids:
+            entry = self._gallery_dict.get(gallery_id)
+            if entry is None:
+                continue
+            if entry.get("thumbnail"):
+                images.append({"gallery_id": gallery_id, "thumbnail": entry["thumbnail"]})
+            elif entry.get("base64"):
+                images.append({"gallery_id": gallery_id, "base64": entry["base64"]})
+            else:
+                missing_ids.append(gallery_id)
+
+        if missing_ids:
+            # Thumbnail evicted from memory to bound RAM — fetch it back from the gallery DB
+            # in a single batched query (same helper /api/gallery uses for the same purpose).
+            db_thumbs = await asyncio.get_running_loop().run_in_executor(
+                None,
+                self._fetch_gallery_thumbnails_from_db,
+                missing_ids,
+            )
+            for gallery_id in missing_ids:
+                db_thumb = db_thumbs.get(gallery_id)
+                if db_thumb:
+                    images.append({"gallery_id": gallery_id, "thumbnail": db_thumb})
+
+        return web.json_response({"images": images})
 
     async def _handle_gallery_models(self, request: web.Request) -> web.Response:
         """Return sorted model names with image counts and the overall gallery total.
