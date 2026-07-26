@@ -56,7 +56,19 @@ fi
 
 if "$SCRIPT_DIR/runtime-rocm.sh" python -s "$SCRIPT_DIR/download_models.py"; then
     echo "Model Download OK. Starting worker..."
-    "$SCRIPT_DIR/runtime-rocm.sh" python -s "$SCRIPT_DIR/run_worker.py" $*
+    while true; do
+        "$SCRIPT_DIR/runtime-rocm.sh" python -s "$SCRIPT_DIR/run_worker.py" $*
+        exit_code=$?
+        # Exit code 42 (consts.WORKER_RESTART_EXIT_CODE) means the worker requested a restart.
+        # os.execv() normally restarts in-place without returning here, but if the shutdown
+        # watchdog had to force-kill the process instead, control returns to this script and
+        # the worker must be re-launched explicitly.
+        if [ "$exit_code" -eq 42 ]; then
+            echo "Worker requested a restart. Restarting..."
+            continue
+        fi
+        break
+    done
 else
     echo "download_models.py exited with error code. Aborting"
 fi
