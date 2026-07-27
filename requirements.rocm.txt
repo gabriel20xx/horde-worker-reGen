@@ -1,15 +1,15 @@
-torch==2.12.0
+torch==2.12.1
 
-horde_sdk~=0.17.1
+horde_sdk~=0.18.0
 horde_safety~=0.3.0
 horde_engine~=2.22.2
-horde_model_reference~=0.10.0
+horde_model_reference~=2.1.5
 
 python-dotenv
 ruamel.yaml
 semver
 
-pydantic>=2.9.2
+pydantic>=2.13.4
 typing_extensions
 requests
 StrEnum
